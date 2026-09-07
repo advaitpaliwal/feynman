@@ -149,7 +149,6 @@ test("rows without vendor caps carry cited hosted-catalog values", () => {
 	// Rows without any traceable source keep the prompt fallback.
 	assert.equal(lookupKnownModelSpec("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")?.maxTokens, undefined);
 });
-
 test("flagship rows carry compat overrides so Pi forwards effort at first-party endpoints", () => {
 	// Kimi K3: Moonshot runtime drops reasoning_effort unless told the endpoint
 	// supports it; the official thinking guide confirms a top-level effort.
