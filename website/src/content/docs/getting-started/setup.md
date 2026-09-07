@@ -108,11 +108,7 @@ feynman model set <provider>/<model-id>
 
 to confirm the local model is available and make it the default.
 
-<<<<<<< HEAD
 For any API-key provider (custom, LM Studio, or LiteLLM), setup also prompts for per-model limits that Feynman would otherwise leave to Pi's safe fallbacks (128k context, 16,384 max output tokens, thinking disabled): context length, max completion tokens, whether the model supports reasoning, and the reasoning efforts it accepts. When it recognizes the model id, Feynman pre-fills these from a built-in catalog of well-known open-weight models (DeepSeek, Kimi, GLM, Qwen, MiMo, Hunyuan, MiniMax, Nemotron) sourced from official docs and, where vendor docs stay silent, cited public hosted catalogs; unrecognized ids prompt with safe defaults. Every value stays editable, and the saved per-model limits are written into the provider's `models.json` entry.
-=======
-For any API-key provider (custom, LM Studio, or LiteLLM), setup also prompts for per-model limits that Feynman would otherwise leave to Pi's safe fallbacks (128k context, 16,384 max output tokens, thinking disabled): context length, max completion tokens, whether the model supports reasoning, and the reasoning efforts it accepts. When it recognizes the model id, Feynman pre-fills these from a built-in catalog of well-known open-weight models (DeepSeek, Kimi, GLM, Qwen, MiMo, Hunyuan, MiniMax, Nemotron) sourced from official docs; unrecognized ids prompt with safe defaults. Every value stays editable, and the saved per-model limits are written into the provider's `models.json` entry.
->>>>>>> 02e0871 (Document new setup per-model limit prompts in setup.md)
 
 ## Stage 3: Optional packages
 
