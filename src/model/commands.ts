@@ -492,9 +492,11 @@ async function promptLmStudioProviderSetup(): Promise<CustomProviderSetup | unde
 		return undefined;
 	}
 
+	const modelDefinitions = await promptModelSpecDefinitions(modelIds);
 	return {
 		providerId: "lm-studio",
 		modelIds,
+		modelDefinitions,
 		baseUrl,
 		api: "openai-completions",
 		apiKeyConfig: "lm-studio",
@@ -551,9 +553,11 @@ async function promptLiteLlmProviderSetup(): Promise<CustomProviderSetup | undef
 		return undefined;
 	}
 
+	const modelDefinitions = await promptModelSpecDefinitions(modelIds);
 	return {
 		providerId: "litellm",
 		modelIds,
+		modelDefinitions,
 		baseUrl,
 		api: "openai-completions",
 		apiKeyConfig,
@@ -763,7 +767,7 @@ async function configureApiKeyProvider(authPath: string, providerId?: string): P
 			apiKey: setup.apiKeyConfig,
 			api: setup.api,
 			authHeader: setup.authHeader,
-			models: setup.modelIds.map((id) => ({ id })),
+			models: setup.modelDefinitions,
 		});
 		if (!result.ok) {
 			printWarning(result.error);
@@ -788,7 +792,7 @@ async function configureApiKeyProvider(authPath: string, providerId?: string): P
 			apiKey: setup.apiKeyConfig,
 			api: setup.api,
 			authHeader: setup.authHeader,
-			models: setup.modelIds.map((id) => ({ id })),
+			models: setup.modelDefinitions,
 		});
 		if (!result.ok) {
 			printWarning(result.error);
