@@ -4,7 +4,7 @@ import { exec as execCallback } from "node:child_process";
 import { promisify } from "node:util";
 
 import { readJson } from "../pi/settings.js";
-import { promptChoice, promptSelect, promptText, type PromptSelectOption } from "../setup/prompts.js";
+import { isInteractiveTerminal, promptChoice, promptConfirm, promptMultiSelect, promptSelect, promptText, type PromptSelectOption } from "../setup/prompts.js";
 import { openUrl } from "../system/open-url.js";
 import { printInfo, printSection, printSuccess, printWarning } from "../ui/terminal.js";
 import {
@@ -17,7 +17,15 @@ import {
 } from "./catalog.js";
 import { MODEL_API_KEY_PROVIDERS, type ApiKeyProviderInfo } from "./api-key-providers.js";
 import { createModelRegistry, createModelRuntime, getModelsJsonPath } from "./registry.js";
-import { upsertProviderBaseUrl, upsertProviderConfig } from "./models-json.js";
+import { upsertProviderBaseUrl, upsertProviderConfig, type ProviderModelDefinition } from "./models-json.js";
+import {
+	buildThinkingLevelMap,
+	lookupKnownModelSpec,
+	parseTokenCountInput,
+	UNKNOWN_MODEL_FALLBACK,
+	type ModelThinkingLevel,
+	specReasoningLevels,
+} from "./spec-catalog.js";
 
 const exec = promisify(execCallback);
 
@@ -139,6 +147,7 @@ async function selectApiKeyProvider(): Promise<ApiKeyProviderInfo | undefined> {
 type CustomProviderSetup = {
 	providerId: string;
 	modelIds: string[];
+	modelDefinitions?: ProviderModelDefinition[];
 	baseUrl: string;
 	api: "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
 	apiKeyConfig: string;
@@ -262,6 +271,86 @@ async function bestEffortFetchOpenAiModelIds(
 	}
 }
 
+async function parseTokenCount(
+	input: string,
+	fallback: number,
+	label: string,
+): Promise<number> {
+	const parsed = parseTokenCountInput(input);
+	if (parsed !== undefined) {
+		return parsed;
+	}
+	printWarning(`${label} must be a positive integer (e.g. 128000 or 128k); using ${fallback}.`);
+	return fallback;
+}
+
+const REASONING_LEVEL_OPTIONS: ModelThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const REASONING_LEVEL_LABELS: Record<ModelThinkingLevel, string> = {
+	off: "off (no reasoning)",
+	minimal: "minimal",
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: "max",
+};
+
+/**
+ * Prompt for the per-model limits Pi otherwise hardcodes (128k context,
+ * 16384 max output tokens, thinking disabled). A recognized model id
+ * pre-fills official specs as editable defaults; an unknown id prompts with
+ * safe fallbacks. Every value stays user-overridable.
+ */
+export async function promptModelSpecDefinitions(modelIds: string[]): Promise<ProviderModelDefinition[]> {
+	if (!isInteractiveTerminal()) {
+		return modelIds.map((id) => ({ id }));
+	}
+
+	const definitions: ProviderModelDefinition[] = [];
+	for (const modelId of modelIds) {
+		const spec = lookupKnownModelSpec(modelId);
+		if (spec) {
+			printInfo(`${modelId}: recognized as ${spec.label} — pre-filled from official specs, edit any value.`);
+			for (const limitation of spec.limitations ?? []) {
+				printWarning(`${modelId}: ${limitation}`);
+			}
+		} else {
+			printInfo(`${modelId}: not in the built-in catalog — showing safe defaults, edit any value.`);
+		}
+
+		const contextWindow = await parseTokenCount(
+			await promptText("Context length (tokens)", String(spec?.contextWindow ?? UNKNOWN_MODEL_FALLBACK.contextWindow)),
+			spec?.contextWindow ?? UNKNOWN_MODEL_FALLBACK.contextWindow,
+			"Context length",
+		);
+		const maxTokens = await parseTokenCount(
+			await promptText("Max completion tokens", String(spec?.maxTokens ?? UNKNOWN_MODEL_FALLBACK.maxTokens)),
+			spec?.maxTokens ?? UNKNOWN_MODEL_FALLBACK.maxTokens,
+			"Max completion tokens",
+		);
+		const reasoning = await promptConfirm("Does the model support reasoning (thinking)?", spec?.reasoning ?? UNKNOWN_MODEL_FALLBACK.reasoning);
+
+		const definition: ProviderModelDefinition = { id: modelId, contextWindow, maxTokens, reasoning };
+		if (reasoning) {
+			const selectedLevels = await promptMultiSelect<ModelThinkingLevel>(
+				`Reasoning efforts ${modelId} accepts:`,
+				REASONING_LEVEL_OPTIONS.map((level) => ({ value: level, label: REASONING_LEVEL_LABELS[level] })),
+				specReasoningLevels(spec),
+			);
+			// Always write an explicit map from the selection: unselected levels
+			// are pinned to null so the runtime cannot send an effort the user
+			// excluded, and selected levels reuse documented provider-specific
+			// values (e.g. GLM, Hunyuan chat-template kwargs) where present.
+			definition.thinkingLevelMap = buildThinkingLevelMap(selectedLevels, spec?.thinkingLevelMap);
+			if (spec?.compat) {
+				definition.compat = structuredClone(spec.compat);
+			}
+		}
+		definitions.push(definition);
+	}
+	return definitions;
+}
+
 async function promptCustomProviderSetup(): Promise<CustomProviderSetup | undefined> {
 	printSection("Custom Provider");
 	const providerIdInput = await promptText("Provider id (e.g. my-proxy)", "custom");
@@ -371,7 +460,8 @@ async function promptCustomProviderSetup(): Promise<CustomProviderSetup | undefi
 		return undefined;
 	}
 
-	return { providerId, modelIds, baseUrl, api, apiKeyConfig, authHeader };
+	const modelDefinitions = await promptModelSpecDefinitions(modelIds);
+	return { providerId, modelIds, modelDefinitions, baseUrl, api, apiKeyConfig, authHeader };
 }
 
 async function promptLmStudioProviderSetup(): Promise<CustomProviderSetup | undefined> {
@@ -723,7 +813,7 @@ async function configureApiKeyProvider(authPath: string, providerId?: string): P
 			apiKey: setup.apiKeyConfig,
 			api: setup.api,
 			authHeader: setup.authHeader,
-			models: setup.modelIds.map((id) => ({ id })),
+			models: setup.modelDefinitions ?? setup.modelIds.map((id) => ({ id })),
 		});
 		if (!result.ok) {
 			printWarning(result.error);

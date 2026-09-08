@@ -48,13 +48,30 @@ export function upsertProviderBaseUrl(
 	return upsertProviderConfig(modelsJsonPath, providerId, { baseUrl });
 }
 
+/**
+ * Per-model definition accepted by Pi's models.json loader. Besides `id`, the
+ * setup flow fills limits it prompted for (or copied from the built-in spec
+ * catalog); pre-existing configs that omit them keep Pi's safe fallbacks.
+ */
+export type ProviderModelDefinition = {
+	id: string;
+	name?: string;
+	api?: string;
+	baseUrl?: string;
+	contextWindow?: number;
+	maxTokens?: number;
+	reasoning?: boolean;
+	thinkingLevelMap?: Record<string, string | null>;
+	compat?: Record<string, unknown>;
+};
+
 export type ProviderConfigPatch = {
 	baseUrl?: string;
 	apiKey?: string;
 	api?: string;
 	authHeader?: boolean;
 	headers?: Record<string, string>;
-	models?: Array<{ id: string }>;
+	models?: ProviderModelDefinition[];
 };
 
 export function upsertProviderConfig(

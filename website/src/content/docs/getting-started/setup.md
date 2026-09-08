@@ -108,6 +108,8 @@ feynman model set <provider>/<model-id>
 
 to confirm the local model is available and make it the default.
 
+For a custom API-key provider, setup also prompts for per-model limits that Feynman would otherwise leave to Pi's safe fallbacks (128k context, 16,384 max output tokens, thinking disabled): context length, max completion tokens, whether the model supports reasoning, and the reasoning efforts it accepts. When it recognizes the model id, Feynman pre-fills these from a built-in catalog of well-known open-weight models (DeepSeek, Kimi, GLM, Qwen, MiMo, Hunyuan, MiniMax, Nemotron) sourced from official docs and, where vendor docs stay silent, cited public hosted catalogs; unrecognized ids prompt with safe defaults. Every value stays editable, and the saved per-model limits are written into the provider's `models.json` entry.
+
 ## Stage 3: Optional packages
 
 Feynman's core ships with the research essentials: alphaXiv access, web access, document parsing, subagents, and `/btw` side conversations while the main research agent is busy. On platforms with supported optional presets, the wizard can offer extras:
