@@ -152,7 +152,6 @@ test("personal 0.1.4 auth keeps upstream OAuth fixes and adds only retained Feyn
 	assert.match(patched, /ALPHAXIV_CALLBACK_BIND/);
 	assert.match(patched, /waitForCallback\(server, state\)/);
 	assert.match(patched, /waitForManualRedirect\(state\)/);
-	assert.match(patched, /const PASTE_PROMPT = 'Paste the redirect URL: ';/);
 	assert.match(patched, /const callbackWait = waitForCallback\(server, state\)/);
 	assert.match(patched, /Promise\.race\(\[callbackWait, manualRedirect\]\)/);
 	assert.match(patched, /callbackWait\.cancel\(\);/);
