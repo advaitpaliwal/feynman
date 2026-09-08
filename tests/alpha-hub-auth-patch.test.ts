@@ -152,6 +152,7 @@ test("personal 0.1.4 auth keeps upstream OAuth fixes and adds only retained Feyn
 	assert.match(patched, /ALPHAXIV_CALLBACK_BIND/);
 	assert.match(patched, /waitForCallback\(server, state\)/);
 	assert.match(patched, /waitForManualRedirect\(state\)/);
+	assert.match(patched, /const PASTE_PROMPT = 'Paste the redirect URL: ';/);
 	assert.match(patched, /const callbackWait = waitForCallback\(server, state\)/);
 	assert.match(patched, /Promise\.race\(\[callbackWait, manualRedirect\]\)/);
 	assert.match(patched, /callbackWait\.cancel\(\);/);
@@ -377,6 +378,21 @@ async function waitForStderrMatch(lines: string[], pattern: RegExp, timeoutMs = 
 	}
 }
 
+// Counts full prompt-chunk renders of the paste prompt on stderr.
+function promptRenders(lines: string[]): number {
+	return lines.filter((line) => line === "Paste the redirect URL: ").length;
+}
+
+async function waitForStderrPromptCount(lines: string[], min: number, timeoutMs = 10_000): Promise<number> {
+	const started = Date.now();
+	for (;;) {
+		const count = promptRenders(lines);
+		if (count >= min) return count;
+		if (Date.now() - started > timeoutMs) throw new Error(`paste prompt rendered only ${count} times (expected ${min})`);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+}
+
 // Starts the patched login() on a free ephemeral port and returns once the
 // auth URL has been printed (so the callback server is bound and waiting).
 async function startLoginOnFreePort(options: { tokenResponse?: Record<string, unknown> } = {}): Promise<{
@@ -530,6 +546,9 @@ test("patched login completes the normal same-device browser flow unchanged", as
 	assert.equal(new URL(authUrl).searchParams.get("response_type"), "code");
 	// The paste fallback prompt coexists with the normal browser flow.
 	assert.ok(stderrLines.some((line) => line.includes("paste the final redirect URL")));
+	// The paste prompt is visible as soon as the paste listener starts.
+	const promptIndex = stderrLines.indexOf("Paste the redirect URL: ");
+	assert.ok(promptIndex >= 0, "the paste prompt renders when the paste listener starts");
 	assert.match(openCommands[0] ?? "", /^xdg-open /);
 
 	const page = await httpGet(module.CALLBACK_PORT, `/callback?code=browser-code&state=${state}`);
@@ -544,6 +563,10 @@ test("patched login completes the normal same-device browser flow unchanged", as
 	assert.equal(authWrites.at(-1)?.client_id, "test-client");
 	assert.equal(authWrites.at(-1)?.user_name, "Tester");
 	assert.equal(authWrites.at(-1)?.user_email, "tester@example.com");
+	// The browser callback won the race with no pasted line and no TTY echo,
+	// so the dangling paste prompt line is closed with one newline.
+	const promptClose = stderrLines.indexOf("\n", promptIndex + 1);
+	assert.ok(promptClose > promptIndex, "the dangling paste prompt line is closed after the callback wins");
 });
 
 test("patched login accepts a pasted redirect URL completed on another device", async () => {
@@ -559,6 +582,13 @@ test("patched login accepts a pasted redirect URL completed on another device", 
 	assert.equal(tokenBodies[0]?.get("redirect_uri"), module.REDIRECT_URI);
 	assert.equal(registerBodies[0]?.redirect_uris?.[0], module.REDIRECT_URI);
 	assert.equal(authWrites.at(-1)?.access_token, "test-access");
+	// A pasted line closes the prompt through the terminal's own Enter echo on
+	// a TTY; with piped stdin (no echo) the settle path writes one newline so
+	// the prompt line still ends cleanly.
+	const promptIndex = stderrLines.indexOf("Paste the redirect URL: ");
+	assert.ok(promptIndex >= 0, "the paste prompt renders when the paste listener starts");
+	const promptClose = stderrLines.indexOf("\n", promptIndex + 1);
+	assert.ok(promptClose > promptIndex, "the prompt line is closed after the pasted login settles");
 });
 
 test("patched login survives a bad pasted redirect and completes on a good one", async () => {
@@ -568,6 +598,10 @@ test("patched login survives a bad pasted redirect and completes on a good one",
 	assert.ok(state);
 	stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=x&state=stale-state\n`);
 	await waitForStderrMatch(stderrLines, /Could not use that URL: OAuth state mismatch/);
+	// The paste prompt re-renders after every unusable line, including a bare
+	// blank Enter: initial render, blank-line re-render, stale-paste re-render.
+	stdin.write("\n");
+	await waitForStderrPromptCount(stderrLines, 3);
 	stdin.write(`http://localhost:${module.CALLBACK_PORT}/callback?code=recovered-code&state=${state}\n`);
 	const result = await settleLogin(loginPromise, () => stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=recovered-code&state=${state}\n`));
 	assert.deepEqual(result.tokens, { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });

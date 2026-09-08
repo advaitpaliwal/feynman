@@ -4,11 +4,12 @@ import { createHash } from "node:crypto";
 // OAuth endpoints/openid/state are already fixed upstream. Feynman adds the
 // Windows/WSL browser and URL-log adaptations, a configurable callback
 // host/port/bind (so the browsing device can differ from the token-storage
-// device, e.g. inside Docker), and a paste-the-redirect-URL login fallback.
+// device, e.g. inside Docker), and a paste-the-redirect-URL login fallback
+// with a visible paste prompt while the CLI waits for input.
 export const ALPHA_HUB_AUTH_014_SOURCE_CONTRACT = Object.freeze({
 	version: "0.1.4",
 	upstreamSha256: "5a16cb4f7fd0faf440951861699450f4d762ae7ef1919701fcded3d4f373ced6",
-	patchedSha256: "be8ba16c328d422c32b594943ae033117e2eb02adef69bc8d90f6c240016f14e",
+	patchedSha256: "60e54a80e037735fa839e77fe7e018b414b6052c3b37be44c2c23c8beb59fa7f",
 });
 const LEGACY_AUTH_SHA256 = "fa1678c9a1e0f4d3240231728dadbd4b778ba9f9f4b937f235624df67346bf6c";
 const sourceDigest = (source) => createHash("sha256").update(source).digest("hex");
@@ -163,10 +164,24 @@ const MANUAL_REDIRECT_HELPERS = [
 	"    process.stderr.write(`Login on a different device? Complete the sign-in anywhere, then paste the final redirect URL here (the ${REDIRECT_URI}?... address the browser ends on) and press Enter. Wait for the browser callback if this machine opened the browser. Ctrl-C cancels.\\n`);",
 	"    let settled = false;",
 	"    const rl = createInterface({ input: process.stdin, terminal: false });",
-	"    settle = (value) => {",
+	// The prompt is the one visible signal that the terminal is waiting for
+	// the pasted URL; it re-appears after every unusable line. Plain ASCII
+	// stays readable on the constrained terminals (Docker, Windows consoles,
+	// SSH sessions) where cross-device login happens.
+	"    const PASTE_PROMPT = 'Paste the redirect URL: ';",
+	"    const writePrompt = () => process.stderr.write(PASTE_PROMPT);",
+	"    writePrompt();",
+	"    settle = (value, fromLine) => {",
 	"      if (settled) return;",
 	"      settled = true;",
 	"      try { rl.close(); } catch {}",
+	// A TTY's own Enter echo closes the prompt line after a pasted line;
+	// with no echo (piped stdin) or when the prompt never received a line
+	// because the browser callback won the race, one newline closes the
+	// dangling prompt so later output starts on a fresh line.
+	"      if (!fromLine || !process.stdin.isTTY) {",
+	"        try { process.stderr.write('\\n'); } catch {}",
+	"      }",
 	"      resolve(value);",
 	"    };",
 	"    rl.on('line', (line) => {",
@@ -176,9 +191,11 @@ const MANUAL_REDIRECT_HELPERS = [
 	"        code = parseManualRedirect(line, expectedState);",
 	"      } catch (err) {",
 	"        process.stderr.write(`Could not use that URL: ${err.message}\\n`);",
+	"        writePrompt();",
 	"        return;",
 	"      }",
-	"      if (code) settle(code);",
+	"      if (code) settle(code, true);",
+	"      else writePrompt();",
 	"    });",
 	// A closed or errored stdin must not settle the race with a null code:
 	// piped-stdin logins still wait for the browser callback, and Ctrl-C

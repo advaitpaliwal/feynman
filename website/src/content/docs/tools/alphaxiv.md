@@ -32,7 +32,8 @@ Feynman.
 **Paste the redirect URL (works everywhere, no network setup):** run
 `feynman alpha login`, complete the sign-in on any device you like, then paste
 the browser's final address — `http://127.0.0.1:9876/callback?code=...` — into
-the waiting CLI. The page may fail to load (nothing may be listening on the
+the waiting CLI, which shows a `Paste the redirect URL:` prompt while it
+listens. The page may fail to load (nothing may be listening on the
 browsing device's loopback), but the address bar still holds the URL; the CLI
 extracts the code from it. Press Ctrl-C to cancel. The wait window is 120
 seconds, so complete the sign-in and paste within that time or rerun the
