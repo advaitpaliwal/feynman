@@ -1,5 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import { createInterface } from "node:readline";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -141,9 +146,16 @@ test("personal 0.1.4 auth keeps upstream OAuth fixes and adds only retained Feyn
 	assert.equal(createHash("sha256").update(patched).digest("hex"), contract.patchedSha256);
 	assert.equal(patchAlphaHubAuthSource(patched, { version: "0.1.4" }), patched);
 	assert.equal(patchAlphaHubAuthSource(PERSONAL_AUTH), patched);
-	assert.equal((patched.match(/const returnedState =/g) || []).length, 1);
-	assert.match(patched, /openid profile email offline_access/);
+	assert.equal((patched.match(/const returnedState =/g) || []).length, 2);
+	assert.match(patched, /ALPHAXIV_CALLBACK_PORT/);
+	assert.match(patched, /ALPHAXIV_CALLBACK_HOST/);
+	assert.match(patched, /ALPHAXIV_CALLBACK_BIND/);
 	assert.match(patched, /waitForCallback\(server, state\)/);
+	assert.match(patched, /waitForManualRedirect\(state\)/);
+	assert.match(patched, /const callbackWait = waitForCallback\(server, state\)/);
+	assert.match(patched, /Promise\.race\(\[callbackWait, manualRedirect\]\)/);
+	assert.match(patched, /callbackWait\.cancel\(\);/);
+	assert.match(patched, /promise\.cancel = \(\) => \{[\s\S]*?clearTimeout\(timeout\);[\s\S]*?\};/);
 	assert.match(patched, /wslview/);
 	assert.match(patched, /Auth URL:/);
 	// Existing branding substitution targeted older simple HTML, not 0.1.3/0.1.4 templates.
@@ -188,4 +200,433 @@ test("personal patched auth executes Windows and WSL browser fallbacks without l
 		run("https://example.invalid/login");
 		assert.deepEqual(commands, expected);
 	}
+});
+
+// --- Behavioral tests -------------------------------------------------------
+// These execute the real patched auth module (imports replaced by test doubles)
+// so the configurable callback and the paste-the-redirect-URL fallback are
+// exercised end to end without touching the live alphaXiv endpoints.
+
+type PatchedAuthModule = {
+	REDIRECT_URI: string;
+	CALLBACK_PORT: number;
+	CALLBACK_HOST: string;
+	CALLBACK_BIND: string;
+	startCallbackServer: () => Promise<Server>;
+	waitForCallback: (server: Server, expectedState: string) => Promise<string>;
+	parseManualRedirect: (raw: string, expectedState: string) => string | null;
+	login: () => Promise<{ tokens: Record<string, unknown>; userInfo: Record<string, unknown> }>;
+};
+
+type LoadedAuth = {
+	module: PatchedAuthModule;
+	stdin: PassThrough;
+	stderrLines: string[];
+	openCommands: string[];
+	registerBodies: Array<{ redirect_uris?: string[] }>;
+	tokenBodies: URLSearchParams[];
+	authWrites: Array<Record<string, unknown>>;
+	timers: {
+		created: Array<{ handle: NodeJS.Timeout; delay: number | undefined }>;
+		cleared: Array<unknown>;
+	};
+	servers: Array<{ server: Server; closes: number }>;
+};
+
+function loadPatchedAuthModule(options: {
+	env?: Record<string, string>;
+	tokenResponse?: Record<string, unknown>;
+} = {}): LoadedAuth {
+	const patched = patchAlphaHubAuthSource(PERSONAL_AUTH, { version: "0.1.4" });
+	const moduleBody = patched.replace(/^import[^\n]*\n/gm, "").replace(/^export /gm, "");
+	const stdin = new PassThrough();
+	const stderrLines: string[] = [];
+	const openCommands: string[] = [];
+	const registerBodies: Array<{ redirect_uris?: string[] }> = [];
+	const tokenBodies: URLSearchParams[] = [];
+	const authWrites: Array<Record<string, unknown>> = [];
+	// Capture the module's real timers and servers with pass-through wrappers,
+	// so cleanup assertions observe actual behavior (the 120-second window stays
+	// live; only its clearing is observed).
+	const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+	const realClearTimeout = globalThis.clearTimeout.bind(globalThis);
+	const createdTimers: Array<{ handle: NodeJS.Timeout; delay: number | undefined }> = [];
+	const clearedTimers: Array<unknown> = [];
+	const timerStub = ((handler: () => void, delay?: number, ...args: never[]) => {
+		const handle = realSetTimeout(handler, delay, ...args) as unknown as NodeJS.Timeout;
+		createdTimers.push({ handle, delay });
+		return handle;
+	}) as unknown as typeof setTimeout;
+	const clearStub = ((handle?: NodeJS.Timeout) => {
+		clearedTimers.push(handle);
+		return realClearTimeout(handle);
+	}) as unknown as typeof clearTimeout;
+	const capturedServers: Array<{ server: Server; closes: number }> = [];
+	const serverStub = ((...args: Parameters<typeof createServer>) => {
+		const server = createServer(...args);
+		const originalClose = server.close.bind(server);
+		const record = { server, closes: 0 };
+		server.close = ((callback?: (error?: Error) => void) => {
+			record.closes += 1;
+			return originalClose(callback);
+		}) as Server["close"];
+		capturedServers.push(record);
+		return server;
+	}) as unknown as typeof createServer;
+	const tokenResponse = options.tokenResponse ?? { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 };
+
+	const fetchStub = (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input);
+		if (url.endsWith("/oauth2/register")) {
+			registerBodies.push(JSON.parse(String(init?.body ?? "{}")) as { redirect_uris?: string[] });
+			return new Response(JSON.stringify({ client_id: "test-client" }), { status: 200 });
+		}
+		if (url.endsWith("/oauth2/token")) {
+			tokenBodies.push(new URLSearchParams(String(init?.body ?? "")));
+			return new Response(JSON.stringify(tokenResponse), { status: 200 });
+		}
+		if (url.endsWith("/oauth2/userinfo")) {
+			return new Response(JSON.stringify({ sub: "user-1", name: "Tester", email: "tester@example.com" }), { status: 200 });
+		}
+		throw new Error(`unexpected fetch in test: ${url}`);
+	}) as typeof fetch;
+
+	const fakeProcess = {
+		env: { ...options.env },
+		stdin,
+		stderr: {
+			write: (chunk: string | Uint8Array): boolean => {
+				stderrLines.push(String(chunk));
+				return true;
+			},
+		},
+	} as unknown as typeof process;
+
+	const build = new Function(
+		"createHash", "randomBytes", "createServer", "readFileSync", "writeFileSync", "mkdirSync", "existsSync",
+		"join", "homedir", "execSync", "platform", "createInterface", "fetch", "process", "setTimeout", "clearTimeout",
+		`${moduleBody}\nreturn { REDIRECT_URI, CALLBACK_PORT, CALLBACK_HOST, CALLBACK_BIND, startCallbackServer, waitForCallback, parseManualRedirect, login };`,
+	);
+	const module = build(
+		createHash,
+		randomBytes,
+		serverStub,
+		() => {
+			throw new Error("no auth file in test");
+		},
+		(_path: string, data: string) => {
+			authWrites.push(JSON.parse(data) as Record<string, unknown>);
+		},
+		() => {},
+		() => false,
+		join,
+		() => "/home/tester",
+		(command: string) => {
+			openCommands.push(command);
+			return "";
+		},
+		() => "linux",
+		createInterface,
+		fetchStub,
+		fakeProcess,
+		timerStub,
+		clearStub,
+	) as PatchedAuthModule;
+	return { module, stdin, stderrLines, openCommands, registerBodies, tokenBodies, authWrites, timers: { created: createdTimers, cleared: clearedTimers }, servers: capturedServers };
+}
+
+function randomPort(): string {
+	return String(30000 + Math.floor(Math.random() * 20000));
+}
+
+function closeServer(server: Server): Promise<void> {
+	return new Promise((resolve, reject) => {
+		server.close((error) => {
+			const code = (error as NodeJS.ErrnoException | undefined)?.code;
+			if (error && code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+			else resolve();
+		});
+	});
+}
+
+async function startServerOnFreePort(options: { env?: Record<string, string>; tokenResponse?: Record<string, unknown> } = {}): Promise<LoadedAuth & { server: Server }> {
+	for (let attempt = 0; attempt < 5; attempt += 1) {
+		const loaded = loadPatchedAuthModule({
+			...options,
+			env: { ...options.env, ALPHAXIV_CALLBACK_PORT: randomPort() },
+		});
+		try {
+			const server = await loaded.module.startCallbackServer();
+			return { ...loaded, server };
+		} catch (error) {
+			// startCallbackServer wraps EADDRINUSE into a plain Error whose message
+			// names the port; detect it by message so the retry loop actually fires.
+			if (!/already in use/.test((error as Error).message ?? "")) throw error;
+		}
+	}
+	throw new Error("no free ephemeral port for tests");
+}
+
+async function waitForStderrMatch(lines: string[], pattern: RegExp, timeoutMs = 10_000): Promise<string> {
+	const started = Date.now();
+	for (;;) {
+		const hit = lines.find((line) => pattern.test(line));
+		if (hit) return hit;
+		if (Date.now() - started > timeoutMs) throw new Error(`stderr never matched ${pattern}`);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+}
+
+// Starts the patched login() on a free ephemeral port and returns once the
+// auth URL has been printed (so the callback server is bound and waiting).
+async function startLoginOnFreePort(options: { tokenResponse?: Record<string, unknown> } = {}): Promise<{
+	loaded: LoadedAuth;
+	loginPromise: Promise<{ tokens: Record<string, unknown>; userInfo: Record<string, unknown> }>;
+	authUrl: string;
+}> {
+	for (let attempt = 0; attempt < 5; attempt += 1) {
+		const loaded = loadPatchedAuthModule({ ...options, env: { ALPHAXIV_CALLBACK_PORT: randomPort() } });
+		const loginPromise = loaded.module.login();
+		const loginRejection = loginPromise.then(() => undefined, (reason: unknown) => reason);
+		try {
+			const authLine = await waitForStderrMatch(loaded.stderrLines, /Auth URL: (\S+)/);
+			const authUrl = authLine.match(/Auth URL: (\S+)/)?.[1] ?? "";
+			if (!authUrl) throw new Error("no auth URL captured");
+			return { loaded, loginPromise, authUrl };
+		} catch (error) {
+			loginPromise.catch(() => {});
+			// A port collision surfaces as the wrapped 'already in use' error on the
+			// login promise (the stderr wait times out first with its own message);
+			// detect either so the retry loop actually fires.
+			const loginError = await loginRejection;
+			const portInUse =
+				/already in use/.test((error as Error).message ?? "") ||
+				(loginError instanceof Error && /already in use/.test(loginError.message));
+			if (!portInUse) throw error;
+		}
+	}
+	throw new Error("no free ephemeral port for tests");
+}
+
+// Guarantees a pending login settles inside the test window; on guard
+// timeout it injects the manual unblock so the suite can still exit cleanly.
+function settleLogin<T>(loginPromise: Promise<T>, unblock: () => void, timeoutMs = 15_000): Promise<T> {
+	let guardFired = false;
+	const guard = new Promise<never>((_resolve, reject) => {
+		const timer = setTimeout(() => {
+			guardFired = true;
+			unblock();
+			reject(new Error("login did not settle within the test window"));
+		}, timeoutMs);
+		timer.unref?.();
+	});
+	return Promise.race([loginPromise, guard]).catch(async (error) => {
+		if (guardFired) await loginPromise.catch(() => undefined as unknown as T);
+		throw error;
+	});
+}
+
+function httpGet(port: number, path: string): Promise<{ status: number; body: string }> {
+	return new Promise((resolve, reject) => {
+		const req = httpRequest({ host: "127.0.0.1", port, path, method: "GET" }, (res) => {
+			let body = "";
+			res.setEncoding("utf8");
+			res.on("data", (chunk: string) => {
+				body += chunk;
+			});
+			res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+		});
+		req.on("error", reject);
+		req.end();
+	});
+}
+
+test("patched manual redirect parser extracts the code and rejects unusable pastes", () => {
+	const { module } = loadPatchedAuthModule();
+	assert.equal(module.parseManualRedirect("http://127.0.0.1:9876/callback?code=abc&state=xyz", "xyz"), "abc");
+	assert.equal(module.parseManualRedirect("  http://localhost:9876/callback?code=abc&state=xyz  ", "xyz"), "abc");
+	assert.equal(module.parseManualRedirect("127.0.0.1:9876/callback?code=abc&state=xyz", "xyz"), "abc");
+	assert.equal(module.parseManualRedirect("https://box.lan:9876/callback?code=abc&state=xyz", "xyz"), "abc");
+	assert.equal(module.parseManualRedirect("", "xyz"), null);
+	assert.equal(module.parseManualRedirect("   ", "xyz"), null);
+	assert.throws(() => module.parseManualRedirect("http://127.0.0.1:9876/other?code=abc&state=xyz", "xyz"), /callback path/);
+	assert.throws(() => module.parseManualRedirect("http://127.0.0.1:9876/callback?error=access_denied&state=xyz", "xyz"), /OAuth error/);
+	assert.throws(() => module.parseManualRedirect("http://127.0.0.1:9876/callback?code=abc&state=other", "xyz"), /state mismatch/);
+	assert.throws(() => module.parseManualRedirect("http://127.0.0.1:9876/callback?state=xyz", "xyz"), /no authorization code/);
+	assert.throws(() => module.parseManualRedirect("completely invalid \\", "xyz"), /not a valid URL/);
+});
+
+test("patched callback constants honor configured host, port, and bind", async () => {
+	const defaults = loadPatchedAuthModule();
+	assert.equal(defaults.module.CALLBACK_PORT, 9876);
+	assert.equal(defaults.module.CALLBACK_HOST, "127.0.0.1");
+	assert.equal(defaults.module.CALLBACK_BIND, "127.0.0.1");
+	assert.equal(defaults.module.REDIRECT_URI, "http://127.0.0.1:9876/callback");
+
+	const loopback = loadPatchedAuthModule({ env: { ALPHAXIV_CALLBACK_PORT: "9443", ALPHAXIV_CALLBACK_HOST: "localhost" } });
+	assert.equal(loopback.module.CALLBACK_PORT, 9443);
+	assert.equal(loopback.module.CALLBACK_HOST, "localhost");
+	assert.equal(loopback.module.CALLBACK_BIND, "localhost");
+	assert.equal(loopback.module.REDIRECT_URI, "http://localhost:9443/callback");
+
+	// A non-loopback callback host is rejected outright, so no non-loopback
+	// host and no https can ever appear in the redirect URI.
+	for (const host of ["box.lan", "10.0.0.5", "[2001:db8::1]"]) {
+		assert.throws(() => loadPatchedAuthModule({ env: { ALPHAXIV_CALLBACK_HOST: host } }), /ALPHAXIV_CALLBACK_HOST must be a loopback host/);
+	}
+	for (const host of ["localhost", "127.0.0.1", "127.8.9.10", "::1", "[::1]"]) {
+		const loaded = loadPatchedAuthModule({ env: { ALPHAXIV_CALLBACK_HOST: host } });
+		const redirectHost = host === "::1" ? "[::1]" : host;
+		assert.equal(loaded.module.REDIRECT_URI, `http://${redirectHost}:9876/callback`);
+		assert.doesNotThrow(() => new URL(loaded.module.REDIRECT_URI));
+		assert.equal(loaded.module.CALLBACK_BIND, host.replace(/^\[|\]$/g, ""));
+	}
+
+	const published = await startServerOnFreePort({ env: { ALPHAXIV_CALLBACK_BIND: "0.0.0.0" } });
+	try {
+		assert.equal(published.module.CALLBACK_HOST, "127.0.0.1");
+		assert.equal(published.module.REDIRECT_URI, `http://127.0.0.1:${published.module.CALLBACK_PORT}/callback`);
+		const address = published.server.address() as AddressInfo;
+		assert.equal(address.address, "0.0.0.0");
+		assert.equal(address.port, published.module.CALLBACK_PORT);
+	} finally {
+		await closeServer(published.server);
+	}
+});
+
+test("patched callback rejects a state mismatch and accepts the matching browser callback", async () => {
+	const { module, server } = await startServerOnFreePort();
+	try {
+		const address = server.address() as AddressInfo;
+		const mismatch = module.waitForCallback(server, "expected-state");
+		const mismatchSettled = assert.rejects(mismatch, /OAuth state mismatch/);
+		const bad = await httpGet(address.port, "/callback?code=x&state=other");
+		assert.equal(bad.status, 400);
+		assert.match(bad.body, /Login failed/);
+		await mismatchSettled;
+		assert.equal(server.listening, false);
+	} finally {
+		await closeServer(server);
+	}
+
+	const fresh = await startServerOnFreePort();
+	try {
+		const wait = fresh.module.waitForCallback(fresh.server, "expected-state");
+		const good = await httpGet((fresh.server.address() as AddressInfo).port, "/callback?code=browser-code&state=expected-state");
+		assert.equal(good.status, 200);
+		assert.match(good.body, /Logged in/);
+		assert.equal(await wait, "browser-code");
+	} finally {
+		await closeServer(fresh.server);
+	}
+});
+
+test("patched login completes the normal same-device browser flow unchanged", async () => {
+	const { loaded, loginPromise, authUrl } = await startLoginOnFreePort();
+	const { module, stdin, stderrLines, tokenBodies, registerBodies, authWrites, openCommands } = loaded;
+	const state = new URL(authUrl).searchParams.get("state");
+	assert.ok(state);
+	assert.equal(new URL(authUrl).searchParams.get("redirect_uri"), module.REDIRECT_URI);
+	assert.equal(new URL(authUrl).searchParams.get("response_type"), "code");
+	// The paste fallback prompt coexists with the normal browser flow.
+	assert.ok(stderrLines.some((line) => line.includes("paste the final redirect URL")));
+	assert.match(openCommands[0] ?? "", /^xdg-open /);
+
+	const page = await httpGet(module.CALLBACK_PORT, `/callback?code=browser-code&state=${state}`);
+	assert.equal(page.status, 200);
+	assert.match(page.body, /Logged in/);
+	const result = await settleLogin(loginPromise, () => stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=late&state=${state}\n`));
+	assert.deepEqual(result.tokens, { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
+	assert.equal(registerBodies[0]?.redirect_uris?.[0], module.REDIRECT_URI);
+	assert.equal(tokenBodies[0]?.get("code"), "browser-code");
+	assert.equal(tokenBodies[0]?.get("redirect_uri"), module.REDIRECT_URI);
+	assert.equal(tokenBodies[0]?.get("client_id"), "test-client");
+	assert.equal(authWrites.at(-1)?.client_id, "test-client");
+	assert.equal(authWrites.at(-1)?.user_name, "Tester");
+	assert.equal(authWrites.at(-1)?.user_email, "tester@example.com");
+});
+
+test("patched login accepts a pasted redirect URL completed on another device", async () => {
+	const { loaded, loginPromise, authUrl } = await startLoginOnFreePort();
+	const { module, stdin, stderrLines, tokenBodies, registerBodies, authWrites } = loaded;
+	const state = new URL(authUrl).searchParams.get("state");
+	assert.ok(state);
+	// No HTTP callback happens: the browser lands on the pasted URL elsewhere.
+	stdin.write(`http://localhost:${module.CALLBACK_PORT}/callback?code=manual-code&state=${state}\n`);
+	const result = await settleLogin(loginPromise, () => stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=manual-code&state=${state}\n`));
+	assert.deepEqual(result.tokens, { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
+	assert.equal(tokenBodies[0]?.get("code"), "manual-code");
+	assert.equal(tokenBodies[0]?.get("redirect_uri"), module.REDIRECT_URI);
+	assert.equal(registerBodies[0]?.redirect_uris?.[0], module.REDIRECT_URI);
+	assert.equal(authWrites.at(-1)?.access_token, "test-access");
+});
+
+test("patched login survives a bad pasted redirect and completes on a good one", async () => {
+	const { loaded, loginPromise, authUrl } = await startLoginOnFreePort();
+	const { module, stdin, stderrLines, tokenBodies } = loaded;
+	const state = new URL(authUrl).searchParams.get("state");
+	assert.ok(state);
+	stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=x&state=stale-state\n`);
+	await waitForStderrMatch(stderrLines, /Could not use that URL: OAuth state mismatch/);
+	stdin.write(`http://localhost:${module.CALLBACK_PORT}/callback?code=recovered-code&state=${state}\n`);
+	const result = await settleLogin(loginPromise, () => stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=recovered-code&state=${state}\n`));
+	assert.deepEqual(result.tokens, { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
+	assert.equal(tokenBodies[0]?.get("code"), "recovered-code");
+});
+
+test("patched login waits for the browser callback even when stdin closes before a paste", async () => {
+	const { loaded, loginPromise, authUrl } = await startLoginOnFreePort();
+	const { module, stdin, tokenBodies } = loaded;
+	const state = new URL(authUrl).searchParams.get("state");
+	assert.ok(state);
+	// Simulate piped stdin: EOF arrives with no pasted line.
+	stdin.end();
+	const page = await httpGet(module.CALLBACK_PORT, `/callback?code=browser-code&state=${state}`);
+	assert.equal(page.status, 200);
+	const result = await settleLogin(loginPromise, () => stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=browser-code&state=${state}\n`));
+	assert.deepEqual(result.tokens, { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
+	assert.equal(tokenBodies[0]?.get("code"), "browser-code");
+});
+
+test("patched login clears the pending 120-second timer and closes the server when a pasted login wins", async () => {
+	const { loaded, loginPromise, authUrl } = await startLoginOnFreePort();
+	const { module, stdin, tokenBodies, timers, servers } = loaded;
+	const state = new URL(authUrl).searchParams.get("state");
+	assert.ok(state);
+	// Regression guard for the cross-device paste path: no HTTP callback ever
+	// reaches the server, so without completion cleanup its pending wait timer
+	// kept the CLI alive for the full window after a successful login.
+	const waitTimer = timers.created.find((entry) => entry.delay === 120000);
+	assert.ok(waitTimer, "login still creates the exact 120-second wait window");
+	assert.ok(!timers.cleared.includes(waitTimer.handle), "the window stays armed while the wait is pending");
+	stdin.write(`http://localhost:${module.CALLBACK_PORT}/callback?code=manual-code&state=${state}\n`);
+	const result = await settleLogin(loginPromise, () => stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=manual-code&state=${state}\n`));
+	assert.deepEqual(result.tokens, { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
+	assert.equal(tokenBodies[0]?.get("code"), "manual-code");
+	// The wait settled through the paste path: the abandoned timer must be
+	// cleared and the callback server closed, so the CLI returns promptly.
+	assert.ok(timers.cleared.includes(waitTimer.handle));
+	const loginServer = servers[0];
+	assert.ok(loginServer);
+	assert.ok(loginServer.closes >= 1, "callback server is closed after a pasted login");
+	assert.equal(loginServer.server.listening, false);
+});
+
+test("patched login performs the same timer and server cleanup after a successful browser callback", async () => {
+	const { loaded, loginPromise, authUrl } = await startLoginOnFreePort();
+	const { module, stdin, tokenBodies, timers, servers } = loaded;
+	const state = new URL(authUrl).searchParams.get("state");
+	assert.ok(state);
+	const page = await httpGet(module.CALLBACK_PORT, `/callback?code=browser-code&state=${state}`);
+	assert.equal(page.status, 200);
+	const result = await settleLogin(loginPromise, () => stdin.write(`http://127.0.0.1:${module.CALLBACK_PORT}/callback?code=late&state=${state}\n`));
+	assert.deepEqual(result.tokens, { access_token: "test-access", refresh_token: "test-refresh", expires_in: 3600 });
+	assert.equal(tokenBodies[0]?.get("code"), "browser-code");
+	const waitTimer = timers.created.find((entry) => entry.delay === 120000);
+	assert.ok(waitTimer, "browser flow still creates the exact 120-second wait window");
+	assert.ok(timers.cleared.includes(waitTimer.handle));
+	const loginServer = servers[0];
+	assert.ok(loginServer);
+	assert.ok(loginServer.closes >= 1, "callback server is closed after a browser callback");
+	assert.equal(loginServer.server.listening, false);
 });

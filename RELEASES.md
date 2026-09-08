@@ -6,6 +6,13 @@ GitHub release notes are generated from the matching `## vX.Y.Z` section in this
 
 ## Unreleased
 
+### Complete alphaXiv login from a different device
+
+- Cross-device login completion is now possible where it previously was not: the login flow used to hard-assume the browsing device and the token-storage device were the same machine. Complete the alphaXiv sign-in on any device, then paste the browser's final `127.0.0.1:...?code=...` address into the waiting CLI, which validates the OAuth state, extracts the token from it, and stores credentials on the device running Feynman.
+- Kept the 120-second login wait and stopped a closed stdin from aborting the normal browser-callback flow.
+- `feynman alpha login` now returns promptly once the login completes on either path: the abandoned 120-second callback timer is cleared and the local callback server is closed when the wait settles, so a successful login no longer keeps the CLI alive until Ctrl-C.
+- Callback tuning as supporting detail: `ALPHAXIV_CALLBACK_PORT` sets the callback port, `ALPHAXIV_CALLBACK_BIND` sets the server bind address (e.g. `0.0.0.0` so a published Docker port receives the redirect), and `ALPHAXIV_CALLBACK_HOST` is loopback-only (`localhost`, `127.x`, `::1`) with non-loopback values rejected, because the alphaXiv authorization server only accepts `http` redirect URIs for loopback hosts.
+
 ## v0.3.49 - 2026-09-06
 
 ### Research runtime refresh

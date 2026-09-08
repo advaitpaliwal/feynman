@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 
 // @advaitpaliwal/alpha-hub@0.1.4, published source 9ec42ba0d499284552220315247b3f2a811e6607.
-// OAuth endpoints/openid/state are already fixed upstream. Only the existing
-// Feynman Windows/WSL browser and URL-log adaptations remain necessary.
+// OAuth endpoints/openid/state are already fixed upstream. Feynman adds the
+// Windows/WSL browser and URL-log adaptations, a configurable callback
+// host/port/bind (so the browsing device can differ from the token-storage
+// device, e.g. inside Docker), and a paste-the-redirect-URL login fallback.
 export const ALPHA_HUB_AUTH_014_SOURCE_CONTRACT = Object.freeze({
 	version: "0.1.4",
 	upstreamSha256: "5a16cb4f7fd0faf440951861699450f4d762ae7ef1919701fcded3d4f373ced6",
-	patchedSha256: "997e5d49e671b5008f8b9a9689170c2d05a2c45f5c2e21b6518f7163c1887098",
+	patchedSha256: "be8ba16c328d422c32b594943ae033117e2eb02adef69bc8d90f6c240016f14e",
 });
 const LEGACY_AUTH_SHA256 = "fa1678c9a1e0f4d3240231728dadbd4b778ba9f9f4b937f235624df67346bf6c";
 const sourceDigest = (source) => createHash("sha256").update(source).digest("hex");
@@ -92,6 +94,164 @@ const VALIDATING_CALLBACK_PARAMS = [
 const LEGACY_CALLBACK_CALL = "  const code = await waitForCallback(server);";
 const VALIDATING_CALLBACK_CALL = "  const code = await waitForCallback(server, state);";
 
+const CURRENT_CALLBACK_CONSTANTS = [
+	"const CALLBACK_PORT = 9876;",
+	"const REDIRECT_URI = `http://127.0.0.1:${CALLBACK_PORT}/callback`;",
+].join("\n");
+
+const CONFIGURABLE_CALLBACK_CONSTANTS = [
+	"const CALLBACK_PORT = Number(process.env.ALPHAXIV_CALLBACK_PORT) || 9876;",
+	"const CALLBACK_HOST = process.env.ALPHAXIV_CALLBACK_HOST || '127.0.0.1';",
+	// The direct browser callback stays loopback-only: reject a non-loopback
+	// callback host so the redirect URI can never reference one.
+	"if (!isLoopbackHost(CALLBACK_HOST)) {",
+	"  throw new Error(`ALPHAXIV_CALLBACK_HOST must be a loopback host (localhost, 127.x, or ::1). The direct browser callback is loopback-only; for cross-device login publish the callback port (ALPHAXIV_CALLBACK_BIND=0.0.0.0) or use the paste-redirect-URL fallback.`);",
+	"}",
+	// The address the local callback server binds; the loopback redirect host
+	// binds itself unless ALPHAXIV_CALLBACK_BIND publishes it (e.g. 0.0.0.0
+	// inside Docker so a forwarded port reaches the server).
+	"const CALLBACK_BIND = process.env.ALPHAXIV_CALLBACK_BIND || CALLBACK_HOST.replace(/^\\[|\\]$/g, '');",
+	// The redirect URI is always http and loopback-only; cross-device
+	// completion uses the paste fallback. A bare IPv6 loopback host is
+	// bracketed in the URI so new URL parses it and browsers can navigate it.
+	"const REDIRECT_HOST = CALLBACK_HOST === '::1' ? '[::1]' : CALLBACK_HOST;",
+	"const REDIRECT_URI = `http://${REDIRECT_HOST}:${CALLBACK_PORT}/callback`;",
+].join("\n");
+
+const CURRENT_LISTEN_TARGET = "    server.listen(CALLBACK_PORT, '127.0.0.1', () => {";
+const CURRENT_LISTEN_PATCHED = "    server.listen(CALLBACK_PORT, CALLBACK_BIND, () => {";
+
+// Helpers for the configurable callback host and the pasted-redirect-URL
+// login fallback, inserted ahead of startCallbackServer.
+const MANUAL_REDIRECT_HELPERS = [
+	"function isLoopbackHost(host) {",
+	"  const bare = host.startsWith('[') ? host.slice(1, -1) : host;",
+	"  return bare === 'localhost' || bare === '::1' || /^127\\.\\d+\\.\\d+\\.\\d+$/.test(bare);",
+	"}",
+	"",
+	"function parseManualRedirect(raw, expectedState) {",
+	"  if (typeof raw !== 'string' || !raw.trim()) return null;",
+	"  let text = raw.trim();",
+	"  if (!/^[a-z][a-z0-9+.-]*:\\/\\//i.test(text)) text = `http://${text}`;",
+	"  let url;",
+	"  try {",
+	"    url = new URL(text);",
+	"  } catch {",
+	"    throw new Error('not a valid URL. Paste the full address the browser ended on.');",
+	"  }",
+	"  if (url.pathname !== '/callback') {",
+	"    throw new Error(`expected the /callback path (got ${url.pathname}). Paste the full address the browser ended on.`);",
+	"  }",
+	"  const error = url.searchParams.get('error');",
+	"  if (error) {",
+	"    throw new Error(`OAuth error: ${error}`);",
+	"  }",
+	"  const returnedState = url.searchParams.get('state');",
+	"  if (!returnedState || returnedState !== expectedState) {",
+	"    throw new Error('OAuth state mismatch. Paste the redirect URL from the same login attempt.');",
+	"  }",
+	"  const code = url.searchParams.get('code');",
+	"  if (!code) {",
+	"    throw new Error('no authorization code found in that URL');",
+	"  }",
+	"  return code;",
+	"}",
+	"",
+	"function waitForManualRedirect(expectedState) {",
+	"  let settle;",
+	"  const promise = new Promise((resolve) => {",
+	"    process.stderr.write(`Login on a different device? Complete the sign-in anywhere, then paste the final redirect URL here (the ${REDIRECT_URI}?... address the browser ends on) and press Enter. Wait for the browser callback if this machine opened the browser. Ctrl-C cancels.\\n`);",
+	"    let settled = false;",
+	"    const rl = createInterface({ input: process.stdin, terminal: false });",
+	"    settle = (value) => {",
+	"      if (settled) return;",
+	"      settled = true;",
+	"      try { rl.close(); } catch {}",
+	"      resolve(value);",
+	"    };",
+	"    rl.on('line', (line) => {",
+	"      if (settled) return;",
+	"      let code;",
+	"      try {",
+	"        code = parseManualRedirect(line, expectedState);",
+	"      } catch (err) {",
+	"        process.stderr.write(`Could not use that URL: ${err.message}\\n`);",
+	"        return;",
+	"      }",
+	"      if (code) settle(code);",
+	"    });",
+	// A closed or errored stdin must not settle the race with a null code:
+	// piped-stdin logins still wait for the browser callback, and Ctrl-C
+	// remains the cancel path. The race winner calls promise.cancel().
+	"    rl.on('close', () => {});",
+	"    rl.on('error', () => {});",
+	"  });",
+	"  promise.cancel = () => settle(null);",
+	"  return promise;",
+	"}",
+	"",
+	"function startCallbackServer() {",
+].join("\n");
+
+const CURRENT_CALLBACK_CALL = "  const code = await waitForCallback(server, state);";
+const RACED_CALLBACK_WAIT = [
+	"  const callbackWait = waitForCallback(server, state);",
+	"  const manualRedirect = waitForManualRedirect(state);",
+	"  let code;",
+	"  try {",
+	"    code = await Promise.race([callbackWait, manualRedirect]);",
+	"  } finally {",
+	// Cleanup on completion, either path: the callback wait's own 120-second
+	// timeout timer stays ref'd until someone clears it (its handler branches
+	// clear it, but a paste-path win never reaches them), and an abandoned
+	// timer kept the CLI alive for the full window after a successful login.
+	"    callbackWait.cancel();",
+	"    manualRedirect.cancel();",
+	"    server.close();",
+	"  }",
+].join("\n");
+
+// waitForCallback holds the 120-second login-wait timer inside its Promise
+// executor, so nothing outside could clear it when the wait settles another
+// way (paste win, or an already-settled callback). Give the returned promise
+// a cancel that clears the abandoned timer; the wait window itself is
+// untouched - only completion cleanup is added.
+const CALLBACK_PROMISE_HEAD_TARGET = [
+	"function waitForCallback(server, expectedState) {",
+	"  return new Promise((resolve, reject) => {",
+	"    const timeout = setTimeout(() => {",
+].join("\n");
+const CALLBACK_PROMISE_HEAD_PATCHED = [
+	"function waitForCallback(server, expectedState) {",
+	"  let timeout;",
+	"  const promise = new Promise((resolve, reject) => {",
+	"    timeout = setTimeout(() => {",
+].join("\n");
+const CALLBACK_PROMISE_TAIL_TARGET = [
+	"        resolve(code);",
+	"      }",
+	"    });",
+	"  });",
+	"}",
+].join("\n");
+const CALLBACK_PROMISE_TAIL_PATCHED = [
+	"        resolve(code);",
+	"      }",
+	"    });",
+	"  });",
+	"  promise.cancel = () => {",
+	"    clearTimeout(timeout);",
+	"  };",
+	"  return promise;",
+	"}",
+].join("\n");
+
+const CURRENT_READLINE_TARGET = "import { platform } from 'node:os';";
+const CURRENT_READLINE_PATCHED = [
+	"import { platform } from 'node:os';",
+	"import { createInterface } from 'node:readline';",
+].join("\n");
+
 const LEGACY_AUTH_ENDPOINTS = [
 	"const CLERK_ISSUER = 'https://clerk.alphaxiv.org';",
 	"const AUTH_ENDPOINT = `${CLERK_ISSUER}/oauth/authorize`;",
@@ -159,6 +319,27 @@ export function patchAlphaHubAuthSource(source, options = {}) {
 	}
 	if (patched.includes(LEGACY_CALLBACK_CALL)) {
 		patched = patched.replace(LEGACY_CALLBACK_CALL, VALIDATING_CALLBACK_CALL);
+	}
+	if (patched.includes(CURRENT_CALLBACK_CONSTANTS)) {
+		patched = patched.replace(CURRENT_CALLBACK_CONSTANTS, CONFIGURABLE_CALLBACK_CONSTANTS);
+	}
+	if (patched.includes(CURRENT_LISTEN_TARGET)) {
+		patched = patched.replace(CURRENT_LISTEN_TARGET, CURRENT_LISTEN_PATCHED);
+	}
+	if (patched.includes("function startCallbackServer() {") && !patched.includes("function parseManualRedirect(")) {
+		patched = patched.replace("function startCallbackServer() {", MANUAL_REDIRECT_HELPERS);
+	}
+	if (patched.includes(CURRENT_READLINE_TARGET) && !patched.includes("createInterface } from 'node:readline'")) {
+		patched = patched.replace(CURRENT_READLINE_TARGET, CURRENT_READLINE_PATCHED);
+	}
+	if (patched.includes(CALLBACK_PROMISE_HEAD_TARGET)) {
+		patched = patched.replace(CALLBACK_PROMISE_HEAD_TARGET, CALLBACK_PROMISE_HEAD_PATCHED);
+	}
+	if (patched.includes(CALLBACK_PROMISE_TAIL_TARGET)) {
+		patched = patched.replace(CALLBACK_PROMISE_TAIL_TARGET, CALLBACK_PROMISE_TAIL_PATCHED);
+	}
+	if (patched.includes(CURRENT_CALLBACK_CALL)) {
+		patched = patched.replace(CURRENT_CALLBACK_CALL, RACED_CALLBACK_WAIT);
 	}
 
 	if (isModule || isReviewedCurrent) assertAlphaHubAuthSource(patched);
