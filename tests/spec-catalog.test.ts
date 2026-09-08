@@ -48,6 +48,34 @@ test("lookupKnownModelSpec matches aliases and dated model ids case-insensitivel
 	assert.equal(lookupKnownModelSpec("hunyuan-t4")?.id, "hy4-preview");
 });
 
+test("lookupKnownModelSpec resolves company-qualified ids to the right family", () => {
+	// Users pass either the bare tag or `<company>/<tag>`; both must resolve.
+	assert.equal(lookupKnownModelSpec("deepseek/deepseek-v4-pro")?.id, "deepseek-v4-pro");
+	assert.equal(lookupKnownModelSpec("deepseek-ai/DeepSeek-V4-Flash")?.id, "deepseek-v4-flash");
+	assert.equal(lookupKnownModelSpec("zai-org/glm-5.3-flash")?.id, "glm-5.3");
+	assert.equal(lookupKnownModelSpec("moonshotai/kimi-k3")?.id, "kimi-k3");
+	assert.equal(lookupKnownModelSpec("moonshotai/kimi-k2.6")?.id, "kimi-k2.6");
+	assert.equal(lookupKnownModelSpec("qwen/qwen3.8-flash")?.id, "qwen3.8-flash");
+	assert.equal(lookupKnownModelSpec("mimo/mimo-v2.5")?.id, "mimo-v2.5");
+	assert.equal(lookupKnownModelSpec("minimax/minimax-m3")?.id, "MiniMax-M3");
+	// The tag falls back to the family pattern inside the named company's rows.
+	assert.equal(lookupKnownModelSpec("tencent/hy3")?.label, "Hunyuan 3 (Tencent)");
+	// Row ids that already carry the org segment keep resolving exactly.
+	assert.equal(lookupKnownModelSpec("nvidia/nemotron-3-ultra-550b-a55b")?.id, "nvidia/nemotron-3-ultra-550b-a55b");
+});
+
+test("a known company segment scopes the tag so shared tags cannot mis-resolve", () => {
+	// A tag foreign to the named company must miss rather than resolve into
+	// another family's rows.
+	assert.equal(lookupKnownModelSpec("zai-org/kimi-k3"), undefined);
+	assert.equal(lookupKnownModelSpec("deepseek/hy3"), undefined);
+	// An unknown company segment falls back to tag-only matching.
+	assert.equal(lookupKnownModelSpec("my-proxy/glm-5.3")?.id, "glm-5.3");
+	assert.equal(lookupKnownModelSpec("my-proxy/totally-made-up"), undefined);
+	// Dated company-qualified ids keep their tolerance.
+	assert.equal(lookupKnownModelSpec("moonshotai/kimi-k3-20260901")?.id, "kimi-k3");
+});
+
 test("unknown model ids miss the catalog and fall back to safe defaults", () => {
 	assert.equal(lookupKnownModelSpec("totally-made-up-model"), undefined);
 	assert.equal(UNKNOWN_MODEL_FALLBACK.contextWindow, 128000);
@@ -189,6 +217,22 @@ test("compat overrides reach models.json through upsertProviderConfig", () => {
 	const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as any;
 	assert.deepEqual(parsed.providers.proxy.models[0].compat, { supportsReasoningEffort: true });
 	assert.deepEqual(parsed.providers.proxy.models[1].compat, { supportsReasoningEffort: true, thinkingFormat: "openai" });
+});
+
+test("DeepSeek rows carry the official low/high/max efforts and the deepseek thinking wire format", () => {
+	for (const id of ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek/deepseek-v4-pro"]) {
+		const spec = lookupKnownModelSpec(id)!;
+		// DeepSeek thinking-mode docs: reasoning_effort accepts ONLY
+		// low / high / max (medium and xhigh map to high server-side), and
+		// thinking toggles via {"thinking": {"type": "enabled" | "disabled"}}
+		// — enabled by default, default effort high.
+		assert.deepEqual(specReasoningLevels(spec), ["low", "high", "max"]);
+		assert.deepEqual(spec.thinkingLevelMap, { minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" });
+		// Pi's "deepseek" thinkingFormat emits exactly this wire shape;
+		// supportsReasoningEffort forwards the selected effort.
+		assert.deepEqual(spec.compat, { thinkingFormat: "deepseek", supportsReasoningEffort: true });
+		assert.ok(spec.sources.includes("https://api-docs.deepseek.com"), `${id} cites the DeepSeek docs`);
+	}
 });
 
 test("specReasoningLevels reads the documented thinking-level map", () => {

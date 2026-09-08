@@ -24,9 +24,19 @@
  * Grok) never appear here — their providers ship their own runtime model
  * registries, so a closed-weight id is simply unknown to this catalog and
  * prompts at setup with safe fallbacks.
+ *
+ * Model ids resolve both as a bare tag (`deepseek-v4-pro`) and as a
+ * company-qualified id (`deepseek/deepseek-v4-pro`, `zai-org/glm-5.3-flash`,
+ * `moonshotai/kimi-k3`); see `lookupKnownModelSpec` for the resolution rules.
  */
 
 export type ModelThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * Catalog family key a row carries in `company`; company segments of
+ * company-qualified model ids resolve to it through `COMPANY_PREFIX_FAMILIES`.
+ */
+export type KnownModelFamily = "deepseek" | "kimi" | "glm" | "qwen" | "mimo" | "hunyuan" | "minimax" | "nemotron";
 
 /**
  * Per-model definition accepted by Pi's models.json loader, carrying the
@@ -46,6 +56,9 @@ export type KnownModelSpec = {
 	id: string;
 	/** Human-readable family label shown during setup. */
 	label: string;
+	/** Family key this row belongs to; a known company segment in a
+	 * company-qualified id scopes tag matching to this family's rows. */
+	company?: KnownModelFamily;
 	/** Official context window in tokens. Undefined = not documented, setup prompts. */
 	contextWindow?: number;
 	/** Official max completion (output) tokens. Undefined = setup prompts. */
@@ -115,9 +128,18 @@ function hunyuanThinkingLevelMap(levels: Array<"low" | "high">): {
 
 export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	// --- DeepSeek ---
+	// DeepSeek thinking-mode docs (captain-verified, firstmate re-verified):
+	// reasoning_effort accepts ONLY low / high / max — medium and xhigh map
+	// to high server-side, low stays low, max stays max — and thinking
+	// toggles through {"thinking": {"type": "enabled" | "disabled"}},
+	// enabled by default with a default effort of high. Pi's "deepseek"
+	// thinkingFormat emits exactly this wire shape (enabled with the mapped
+	// effort, or disabled when no effort is selected), so the map below
+	// carries the three documented efforts and leaves `off` to the toggle.
 	{
 		id: "deepseek-v4-pro",
 		label: "DeepSeek V4 Pro",
+		company: "deepseek",
 		// Thinking mode and reasoning_effort are officially documented, but
 		// first-party caps are not. Hosted-catalog values (read 2026-09-08):
 		// DeepInfra deepseek-ai/DeepSeek-V4-Pro 1048576/1048576; Novita hosts
@@ -125,17 +147,22 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 		contextWindow: 1048576,
 		maxTokens: 393216,
 		reasoning: true,
+		thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+		compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true },
 		matches: ["deepseek-v4-pro-0813"],
 		sources: [DEEPSEEK_DOCS, DEEPINFRA_CATALOG],
 	},
 	{
 		id: "deepseek-v4-flash",
 		label: "DeepSeek V4 Flash",
+		company: "deepseek",
 		// Hosted-catalog values (read 2026-09-08): DeepInfra 1048576/1048576
 		// for deepseek-ai/DeepSeek-V4-Flash; Novita hosts 393216 output.
 		contextWindow: 1048576,
 		maxTokens: 393216,
 		reasoning: true,
+		thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+		compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true },
 		matches: ["deepseek-v4-flash-0731", "deepseek-v4-flash-vision-exp"],
 		sources: [DEEPSEEK_DOCS, DEEPINFRA_CATALOG],
 	},
@@ -144,6 +171,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "kimi-k3",
 		label: "Kimi K3 (Moonshot)",
+		company: "kimi",
 		// Official docs: 1M-token context window; reasoning_effort supports
 		// "low" / "high" / "max" (default "max"). Hosted catalogs agree on the
 		// caps (read 2026-09-08): DeepInfra and Novita both host K3 at
@@ -162,6 +190,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "kimi-k2.6",
 		label: "Kimi K2.6 (Moonshot)",
+		company: "kimi",
 		// Official docs: 256K context window, thinking and non-thinking modes;
 		// per-model effort parameter values differ from K3, so the map is
 		// prompted, not assumed. Hosted catalogs agree on the caps (read
@@ -179,6 +208,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "kimi-k2.7-code",
 		label: "Kimi K2.7 Code (Moonshot)",
+		company: "kimi",
 		// Official docs: 256K context window with thinking mode. Hosted
 		// catalogs agree (read 2026-09-08): DeepInfra and Novita both host
 		// K2.7-Code at 262144/262144.
@@ -192,6 +222,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "kimi-k2-0905-preview",
 		label: "Kimi K2 0905 (Moonshot)",
+		company: "kimi",
 		// Novita hosts moonshotai/kimi-k2-0905 at 262144/100352 (read
 		// 2026-09-08); DeepInfra does not carry this variant.
 		contextWindow: 262144,
@@ -203,6 +234,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "kimi-k2-0711-preview",
 		label: "Kimi K2 0711 (Moonshot)",
+		company: "kimi",
 		// Novita hosts moonshotai/kimi-k2-instruct (the K2 131072-context
 		// variant) at 131072/100352 (read 2026-09-08); no deepinfra variant.
 		contextWindow: 131072,
@@ -215,6 +247,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "glm-5.3",
 		label: "GLM 5.3 (Z.AI)",
+		company: "glm",
 		// Official docs: 1M context, 128K max output; reasoning is always on
 		// (disabling no longer supported) with effort levels low / high / max.
 		contextWindow: 1048576,
@@ -233,6 +266,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "glm-5.2",
 		label: "GLM 5.2 (Z.AI)",
+		company: "glm",
 		// Hosted catalogs (read 2026-09-08): Novita zai-org/glm-5.2 at
 		// 1048576 context / 131072 output (consistent with the GLM-5.3
 		// vendor output cap); DeepInfra hosts a 1048576/1048576 deployment.
@@ -248,6 +282,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "glm-5.1",
 		label: "GLM 5.1 (Z.AI)",
+		company: "glm",
 		// Hosted-catalog values (read 2026-09-08, captain-verified): DeepInfra
 		// zai-org/GLM-5.1 at 202752/202752; Novita hosts 204800/131072 for
 		// the same id - hosted deployments differ.
@@ -263,6 +298,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "qwen3.8-max",
 		label: "Qwen 3.8 Max (Alibaba)",
+		company: "qwen",
 		// Hosted-catalog values (read 2026-09-08): Novita qwen/qwen3.8-max at
 		// 1000000/131072 (consistent with the official qwen3.8-flash family
 		// values); DeepInfra hosts a 256000/256000 deployment - differs.
@@ -274,6 +310,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "qwen3.8-flash",
 		label: "Qwen 3.8 Flash (Alibaba)",
+		company: "qwen",
 		// Official Model Studio page (alibabacloud.com/help/en/model-studio/
 		// qwen3-8-flash.md): context window 1,000,000; max output 131,072
 		// (thinking and direct modes); multimodal reasoning model.
@@ -285,6 +322,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "qwen3.8-flash-next",
 		label: "Qwen 3.8 Flash Next (Alibaba)",
+		company: "qwen",
 		// Official Qwen3.8-Flash-Next card (huggingface.co/Qwen/Qwen3.8-Flash-Next):
 		// context 262,144 natively (extensible to 1,000,000 only via self-hosted
 		// YaRN RoPE scaling); recommended final-response output 131,072
@@ -299,6 +337,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "qwen3.7-max",
 		label: "Qwen 3.7 Max (Alibaba)",
+		company: "qwen",
 		reasoning: true,
 		matches: ["qwen3.7-plus", "qwen3.6-plus", "qwen3.6-flash"],
 		sources: [QWEN_DOCS],
@@ -308,6 +347,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "mimo-v2.5",
 		label: "MiMo v2.5 (Xiaomi)",
+		company: "mimo",
 		// Official HF config.json: max_position_embeddings 1048576 for both
 		// variants. Hosted-catalog output cap (read 2026-09-08): Novita hosts
 		// both mimo-v2.5 and mimo-v2.5-pro at 1048576/131072 (consistent with
@@ -323,6 +363,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "hy3",
 		label: "Hunyuan 3 (Tencent)",
+		company: "hunyuan",
 		contextWindow: 262144,
 		// Tencent documents the context length and reasoning efforts but no
 		// official max-completion cap; DeepInfra hosts tencent/Hy3 at
@@ -337,6 +378,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "hy4-preview",
 		label: "Hunyuan 4 (Tencent)",
+		company: "hunyuan",
 		contextWindow: 1048576,
 		maxTokens: 64000,
 		// No official max-completion cap is documented and neither hosted
@@ -352,6 +394,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "MiniMax-M3",
 		label: "MiniMax M3",
+		company: "minimax",
 		// Official docs: 1,000,000-token context window. Hosted-catalog output
 		// cap (read 2026-09-08): Novita minimax/minimax-m3 at 1000000/131072
 		// (context matches the vendor doc); DeepInfra hosts 524288/524288.
@@ -364,6 +407,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "MiniMax-M2.7",
 		label: "MiniMax M2.7",
+		company: "minimax",
 		// Official docs: 204,800 context window; hosted-catalog output cap
 		// (read 2026-09-08): Novita hosts minimax-m2.7 and
 		// minimax-m2.7-highspeed at 204800/131072.
@@ -378,6 +422,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "nvidia/nemotron-3-super-120b-a12b",
 		label: "NVIDIA Nemotron 3 Super",
+		company: "nemotron",
 		// Official build.nvidia.com specification: contextLength 1048576
 		// (serving defaults to 256k; the model spec is 1M). Hosted-catalog
 		// output cap (read 2026-09-08): DeepInfra hosts the model at
@@ -394,6 +439,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "nvidia/nemotron-3-ultra-550b-a55b",
 		label: "NVIDIA Nemotron 3 Ultra",
+		company: "nemotron",
 		// Official build.nvidia.com specification: contextLength 1048576.
 		// Hosted-catalog output cap (read 2026-09-08): DeepInfra hosts the
 		// model at 262144/262144.
@@ -407,6 +453,7 @@ export const KNOWN_MODEL_SPECS: KnownModelSpec[] = [
 	{
 		id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
 		label: "NVIDIA Nemotron 3 Nano Omni",
+		company: "nemotron",
 		// Official build.nvidia.com specification: contextLength 262144,
 		// omni-modal input (text, image, audio, video). The hosted catalogs
 		// carry no matching omni variant (read 2026-09-08), so setup prompts
@@ -430,19 +477,106 @@ export const UNKNOWN_MODEL_FALLBACK = {
 const DATE_SUFFIX_PATTERN = /-\d{8}$/;
 
 /**
- * Resolve a bare model id against the built-in catalog. Matching is
- * case-insensitive on the exact id and documented aliases, tolerates a
- * trailing `-YYYYMMDD` date suffix, and falls back to an anchored family
- * pattern when one is declared.
+ * Hosted-org segments that may prefix a model id's tag (e.g. `deepseek` in
+ * `deepseek/deepseek-v4-pro`, `zai-org` in `zai-org/glm-5.3-flash`,
+ * `moonshotai` in `moonshotai/kimi-k3`), each resolving to the `company`
+ * family key its rows carry. A known company scopes tag matching to that
+ * company's rows so a tag shared across companies cannot mis-resolve.
+ */
+const COMPANY_PREFIX_FAMILIES: Record<string, KnownModelFamily> = {
+	// DeepSeek (first-party domain and the DeepInfra/HF org casing)
+	deepseek: "deepseek",
+	"deepseek-ai": "deepseek",
+	// Kimi (Moonshot)
+	moonshotai: "kimi",
+	moonshot: "kimi",
+	// GLM (Zhipu / Z.AI)
+	"zai-org": "glm",
+	zai: "glm",
+	"z-ai": "glm",
+	zhipu: "glm",
+	"zhipu-ai": "glm",
+	zhipuai: "glm",
+	// Qwen (Alibaba)
+	qwen: "qwen",
+	alibaba: "qwen",
+	alibabacloud: "qwen",
+	// MiMo (Xiaomi)
+	xiaomi: "mimo",
+	mimo: "mimo",
+	// Hunyuan (Tencent)
+	tencent: "hunyuan",
+	"tencent-hunyuan": "hunyuan",
+	// MiniMax
+	minimax: "minimax",
+	// Nemotron (NVIDIA)
+	nvidia: "nemotron",
+};
+
+const COMPILED_SPEC_PATTERNS = new WeakMap<KnownModelSpec, RegExp>();
+
+function compiledSpecPattern(spec: KnownModelSpec): RegExp | undefined {
+	if (spec.pattern === undefined) return undefined;
+	let compiled = COMPILED_SPEC_PATTERNS.get(spec);
+	if (!compiled) {
+		compiled = new RegExp(spec.pattern, "i");
+		COMPILED_SPEC_PATTERNS.set(spec, compiled);
+	}
+	return compiled;
+}
+
+/**
+ * Match a bare model tag against a pool of catalog rows: exact id or
+ * documented alias (case-insensitive), a trailing `-YYYYMMDD` date suffix
+ * tolerated, then an anchored family pattern when one is declared. Catalog
+ * order breaks alias collisions deterministically.
+ */
+function findSpecByTag(tag: string, pool: readonly KnownModelSpec[]): KnownModelSpec | undefined {
+	const normalized = tag.trim().toLowerCase();
+	if (!normalized) return undefined;
+
+	const exact = (candidate: string) =>
+		pool.find((spec) => spec.id.toLowerCase() === candidate
+			|| (spec.matches ?? []).some((alias) => alias.toLowerCase() === candidate));
+	const hit = exact(normalized)
+		?? (DATE_SUFFIX_PATTERN.test(normalized) ? exact(normalized.replace(DATE_SUFFIX_PATTERN, "")) : undefined);
+	if (hit) return hit;
+
+	for (const spec of pool) {
+		if (compiledSpecPattern(spec)?.test(normalized)) return spec;
+	}
+	return undefined;
+}
+
+/**
+ * Resolve a model id against the built-in catalog. Accepts both the bare tag
+ * (`deepseek-v4-pro`) and a company-qualified id (`deepseek/deepseek-v4-pro`,
+ * `zai-org/glm-5.3-flash`, `moonshotai/kimi-k3`). Matching is case-insensitive
+ * on the exact id and documented aliases, tolerates a trailing `-YYYYMMDD`
+ * date suffix, and falls back to an anchored family pattern when one is
+ * declared. A known company segment scopes the tag to that company's rows so
+ * a tag shared across companies cannot mis-resolve; an unknown company
+ * segment falls back to tag-only matching.
  */
 export function lookupKnownModelSpec(modelId: string): KnownModelSpec | undefined {
 	const id = modelId.trim().toLowerCase();
 	if (!id) return undefined;
 
 	const exact = (candidate: string) => KNOWN_SPEC_INDEX.get(candidate);
-	return exact(id)
-		?? (DATE_SUFFIX_PATTERN.test(id) ? exact(id.replace(DATE_SUFFIX_PATTERN, "")) : undefined)
-		?? KNOWN_SPEC_PATTERNS.reduce<KnownModelSpec | undefined>((hit, pattern) => hit ?? (pattern.pattern.test(id) ? pattern.spec : undefined), undefined);
+	const exactHit = exact(id)
+		?? (DATE_SUFFIX_PATTERN.test(id) ? exact(id.replace(DATE_SUFFIX_PATTERN, "")) : undefined);
+	if (exactHit) return exactHit;
+
+	const slash = id.indexOf("/");
+	if (slash <= 0) {
+		return findSpecByTag(id, KNOWN_MODEL_SPECS);
+	}
+
+	const family = COMPANY_PREFIX_FAMILIES[id.slice(0, slash)];
+	const pool = family
+		? KNOWN_MODEL_SPECS.filter((spec) => spec.company === family)
+		: KNOWN_MODEL_SPECS;
+	return findSpecByTag(id.slice(slash + 1), pool);
 }
 
 const KNOWN_SPEC_INDEX = new Map<string, KnownModelSpec>();
@@ -452,11 +586,6 @@ for (const spec of KNOWN_MODEL_SPECS) {
 		KNOWN_SPEC_INDEX.set(alias.toLowerCase(), spec);
 	}
 }
-
-const KNOWN_SPEC_PATTERNS = KNOWN_MODEL_SPECS.filter((spec) => spec.pattern !== undefined).map((spec) => ({
-	spec,
-	pattern: new RegExp(spec.pattern!, "i"),
-}));
 
 /**
  * Reasoning efforts a catalog spec documents, derived from its thinking-level
