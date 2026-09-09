@@ -37,6 +37,9 @@ export const DEFAULT_SCORE_WEIGHTS: Record<ScoreComponentKey, number> = {
 const OPENALEX_WORKS_URL = "https://api.openalex.org/works";
 const ARXIV_API_URL = "https://export.arxiv.org/api/query";
 const EXTERNAL_FETCH_TIMEOUT_MS = 15_000;
+const OPENALEX_MAX_RETRIES = 2;
+const OPENALEX_RETRY_BASE_MS = 250;
+const OPENALEX_RETRY_MAX_MS = 2_000;
 const OPENALEX_SELECT_FIELDS = [
 	"id",
 	"doi",
@@ -1188,6 +1191,32 @@ async function fetchWithTimeout(
 	}
 }
 
+function retryDelayMilliseconds(response: Response, attempt: number): number {
+	const retryAfter = response.headers.get("retry-after")?.trim();
+	if (retryAfter) {
+		const seconds = Number(retryAfter);
+		if (Number.isFinite(seconds) && seconds >= 0) return Math.min(OPENALEX_RETRY_MAX_MS, seconds * 1000);
+		const timestamp = Date.parse(retryAfter);
+		if (Number.isFinite(timestamp)) return Math.min(OPENALEX_RETRY_MAX_MS, Math.max(0, timestamp - Date.now()));
+	}
+	return Math.min(OPENALEX_RETRY_MAX_MS, OPENALEX_RETRY_BASE_MS * (2 ** attempt));
+}
+
+async function fetchOpenAlexWithRetry(
+	fetchImpl: typeof fetch,
+	input: string | URL,
+	init: RequestInit,
+	label: string,
+): Promise<Response> {
+	for (let attempt = 0; attempt <= OPENALEX_MAX_RETRIES; attempt += 1) {
+		const response = await fetchWithTimeout(fetchImpl, input, init, label);
+		const retryable = response.status === 429 || response.status >= 500;
+		if (!retryable || attempt === OPENALEX_MAX_RETRIES) return response;
+		await new Promise((resolve) => setTimeout(resolve, retryDelayMilliseconds(response, attempt)));
+	}
+	throw new Error(`${label} exhausted bounded retries`);
+}
+
 export async function fetchOpenAlexWorks(
 	topic: string,
 	limit: number,
@@ -1198,7 +1227,7 @@ export async function fetchOpenAlexWorks(
 	url.searchParams.set("per-page", String(limit));
 	url.searchParams.set("select", OPENALEX_SELECT_FIELDS);
 
-	const response = await fetchWithTimeout(fetchImpl, url, {
+	const response = await fetchOpenAlexWithRetry(fetchImpl, url, {
 		headers: {
 			Accept: "application/json",
 			"User-Agent": "Feynman PaperRank local research workflow",
@@ -1224,7 +1253,7 @@ export async function fetchOpenAlexWorksByIds(
 	url.searchParams.set("filter", `openalex:${shortIds.join("|")}`);
 	url.searchParams.set("per-page", String(shortIds.length));
 	url.searchParams.set("select", OPENALEX_SELECT_FIELDS);
-	const response = await fetchWithTimeout(fetchImpl, url, {
+	const response = await fetchOpenAlexWithRetry(fetchImpl, url, {
 		headers: {
 			Accept: "application/json",
 			"User-Agent": "Feynman PaperRank citation expansion workflow",
@@ -1252,7 +1281,7 @@ export async function fetchOpenAlexWorksCiting(
 	url.searchParams.set("per-page", String(limit));
 	url.searchParams.set("sort", "cited_by_count:desc");
 	url.searchParams.set("select", OPENALEX_SELECT_FIELDS);
-	const response = await fetchWithTimeout(fetchImpl, url, {
+	const response = await fetchOpenAlexWithRetry(fetchImpl, url, {
 		headers: {
 			Accept: "application/json",
 			"User-Agent": "Feynman PaperRank citation expansion workflow",
@@ -1598,7 +1627,11 @@ function safeExternalUrl(value: string | null | undefined): string | undefined {
 	}
 }
 
-export function buildFullTextAccessPlan(paper: PaperRecord, generatedAt?: string): FullTextAccessPlan {
+export function buildFullTextAccessPlan(
+	paper: PaperRecord,
+	generatedAt?: string,
+	preferredCandidate?: string,
+): FullTextAccessPlan {
 	const candidates: FullTextAccessCandidate[] = [];
 	const seen = new Set<string>();
 	const add = (candidate: FullTextAccessCandidate) => {
@@ -1617,6 +1650,16 @@ export function buildFullTextAccessPlan(paper: PaperRecord, generatedAt?: string
 			isOpenAccess: true,
 			canFetch: true,
 			note: "Feynman can fetch arXiv paper text through the bundled alphaXiv client when available.",
+		});
+		add({
+			source: "arXiv",
+			kind: "api_full_text",
+			label: "arXiv HTML",
+			identifier: paper.arxivId,
+			url: `https://arxiv.org/html/${paper.arxivId}`,
+			isOpenAccess: true,
+			canFetch: true,
+			note: "Official arXiv HTML is used as a bounded full-text fallback when the primary reader is unavailable.",
 		});
 		add({
 			source: "arXiv",
@@ -1722,6 +1765,9 @@ export function buildFullTextAccessPlan(paper: PaperRecord, generatedAt?: string
 					? "candidates_found"
 					: "no_candidate";
 	const bestCandidate =
+		(preferredCandidate
+			? candidates.find((candidate) => candidate.canFetch && (candidate.label === preferredCandidate || candidate.source === preferredCandidate))
+			: undefined) ??
 		candidates.find((candidate) => candidate.canFetch) ??
 		candidates.find((candidate) => candidate.isOpenAccess) ??
 		candidates[0];
@@ -3991,6 +4037,48 @@ export async function fetchAlphaPaperContent(paper: PaperRecord): Promise<PaperC
 	}
 }
 
+function htmlToText(html: string): string | undefined {
+	const text = html
+		.replace(/<!--[\s\S]*?-->/g, " ")
+		.replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+		.replace(/<\/?(?:address|article|br|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|th|thead|tr|ul)\b[^>]*>/gi, "\n")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&(?:amp|lt|gt|quot|apos|nbsp|#39|#x[0-9a-f]+|#[0-9]+);/gi, (match) => {
+			const entity = match.slice(1, -1).toLowerCase();
+			if (entity === "amp") return "&";
+			if (entity === "lt") return "<";
+			if (entity === "gt") return ">";
+			if (entity === "quot") return '"';
+			if (entity === "apos" || entity === "#39") return "'";
+			if (entity === "nbsp") return " ";
+			const codePoint = entity.startsWith("#x")
+				? Number.parseInt(entity.slice(2), 16)
+				: Number.parseInt(entity.slice(1), 10);
+			return Number.isInteger(codePoint) && isXmlCharacter(codePoint) ? String.fromCodePoint(codePoint) : match;
+		})
+		.replace(/[ \t]+/g, " ")
+		.replace(/\n\s+/g, "\n")
+		.replace(/\n{3,}/g, "\n\n");
+	return cleanString(text);
+}
+
+export async function fetchArxivPaperContent(
+	paper: PaperRecord,
+	fetchImpl: typeof fetch = fetch,
+): Promise<PaperContentFetchResult | undefined> {
+	if (!paper.arxivId) return undefined;
+	const url = `https://arxiv.org/html/${paper.arxivId}`;
+	const response = await fetchWithTimeout(fetchImpl, url, {
+		headers: {
+			Accept: "text/html",
+			"User-Agent": "Feynman arXiv HTML resolver",
+		},
+	}, "arXiv HTML full-text request");
+	if (!response.ok) return undefined;
+	const content = htmlToText(await response.text());
+	return content ? { content, source: "arXiv HTML" } : undefined;
+}
+
 export async function fetchEuropePmcPaperContent(
 	paper: PaperRecord,
 	fetchImpl: typeof fetch = fetch,
@@ -4078,6 +4166,12 @@ function createDefaultPaperContentFetcher(fetchImpl: typeof fetch = fetch): Pape
 			} catch (error) {
 				errors.push(artifactErrorMessage("alphaXiv", error));
 			}
+			try {
+				const result = await fetchArxivPaperContent(paper, fetchImpl);
+				if (extractPaperContentText(result?.content)) return result;
+			} catch (error) {
+				errors.push(artifactErrorMessage("arXiv HTML", error));
+			}
 		}
 		if (paper.pmcid || paper.pmid || paper.doi) {
 			try {
@@ -4145,7 +4239,7 @@ export async function enrichPapersWithFullText(
 			};
 			updates.set(paper.paperId, {
 				...enrichedPaper,
-				fullTextAccess: buildFullTextAccessPlan(enrichedPaper, options.fetchedAt),
+				fullTextAccess: buildFullTextAccessPlan(enrichedPaper, options.fetchedAt, source),
 			});
 		} catch (error) {
 			const erroredPaper: PaperRecord = {
@@ -4369,7 +4463,7 @@ export async function fetchOpenAlexWorkByIdentifier(
 	}
 	url.searchParams.set("per-page", arxivId || isTitleSearchIdentifier(normalized) ? "10" : "1");
 	url.searchParams.set("select", OPENALEX_SELECT_FIELDS);
-	const response = await fetchWithTimeout(fetchImpl, url, {
+	const response = await fetchOpenAlexWithRetry(fetchImpl, url, {
 		headers: {
 			Accept: "application/json",
 			"User-Agent": "Feynman paper access resolver",
@@ -4442,7 +4536,7 @@ export async function resolvePaperAccess(options: PaperAccessOptions): Promise<P
 					fullTextSections: extractFullTextSections(text, sourceLabel),
 					provenance: appendProvenance(paper.provenance, sourceLabel, ["fullText", "fullTextSections"]),
 				};
-				paper = { ...paper, fullTextAccess: buildFullTextAccessPlan(paper, generatedAt) };
+				paper = { ...paper, fullTextAccess: buildFullTextAccessPlan(paper, generatedAt, sourceLabel) };
 				fullText = {
 					requested: true,
 					status: "available",
