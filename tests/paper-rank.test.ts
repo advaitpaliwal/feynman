@@ -18,6 +18,7 @@ import {
 	extractEvidenceSpans,
 	extractFullTextSections,
 	extractPaperContentText,
+	fetchArxivPaperContent,
 	fetchEuropePmcPaperContent,
 	fetchOpenAlexWorks,
 	generateFieldMap,
@@ -40,6 +41,7 @@ import {
 	runPaperRank,
 	scorePapers,
 	slugifyTopic,
+	type PaperRecord,
 } from "../src/rank/paper-rank.js";
 
 const fixturePath = resolve(process.cwd(), "tests", "fixtures", "openalex-rank.json");
@@ -102,6 +104,23 @@ test("fetchOpenAlexWorks bounds provider calls with an abort signal", async () =
 	assert.equal(result.works.length, 0);
 	assert.ok(signal);
 	assert.equal(signal.aborted, false);
+});
+
+test("fetchOpenAlexWorks retries a rate-limited provider once with bounded backoff", async () => {
+	let calls = 0;
+	const fetchImpl = async () => {
+		calls += 1;
+		if (calls === 1) return new Response("busy", { status: 429, headers: { "retry-after": "0" } });
+		return new Response(JSON.stringify({ results: [], meta: { count: 0 } }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	};
+
+	const result = await fetchOpenAlexWorks("rate limited topic", 1, fetchImpl as typeof fetch);
+
+	assert.equal(result.works.length, 0);
+	assert.equal(calls, 2);
 });
 
 test("PaperRank slug and limit parsing are stable", () => {
@@ -183,6 +202,19 @@ test("extractPaperContentText normalizes common alphaXiv content payload shapes"
 	assert.equal(extractPaperContentText(["Intro", { text: "Methods" }]), "Intro\nMethods");
 });
 
+test("fetchArxivPaperContent converts official HTML into bounded text", async () => {
+	const fetchImpl = (async () => new Response(
+		"<html><head><style>.x{}</style></head><body><h1>Abstract</h1><p>We test &amp; compare.</p><script>secret()</script><h2>Methods</h2><p>Finite probe.</p></body></html>",
+		{ status: 200, headers: { "content-type": "text/html" } },
+	)) as typeof fetch;
+	const result = await fetchArxivPaperContent({ arxivId: "2609.04506" } as PaperRecord, fetchImpl);
+
+	assert.equal(result?.source, "arXiv HTML");
+	assert.match(extractPaperContentText(result?.content) ?? "", /Abstract\nWe test & compare/);
+	assert.match(extractPaperContentText(result?.content) ?? "", /Methods\nFinite probe/);
+	assert.doesNotMatch(extractPaperContentText(result?.content) ?? "", /secret/);
+});
+
 test("extractFullTextSections preserves canonical section offsets", () => {
 	const text = [
 		"# Methods",
@@ -257,6 +289,8 @@ test("buildFullTextAccessPlan records legal source-specific candidates", () => {
 
 	assert.equal(access.status, "candidates_found");
 	assert.ok(access.candidates.some((candidate) => candidate.source === "alphaXiv" && candidate.canFetch));
+	assert.ok(access.candidates.some((candidate) => candidate.label === "arXiv HTML" && candidate.canFetch));
+	assert.equal(buildFullTextAccessPlan(paper, undefined, "arXiv HTML").bestCandidate?.label, "arXiv HTML");
 	assert.ok(access.candidates.some((candidate) => candidate.source === "Europe PMC" && candidate.kind === "full_text_xml" && candidate.canFetch));
 	assert.ok(access.candidates.some((candidate) => candidate.source === "DOI"));
 	assert.ok(access.limits.some((limit) => /does not bypass paywalls/i.test(limit)));
