@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { removeTemporaryTree } from "./temporary-tree-cleanup.mjs";
 
 // Exact registry esbuild 0.28.2 wrapper/manifest; 23 vendor binary hashes plus
 // three WASM-platform binary hashes from integrity-verified platform tarballs.
@@ -482,7 +483,7 @@ export function patchPiEsbuildPackageTree(nodeModulesPath, sourcePackagePath = r
 		changed = true;
 	}
 	for (const target of targets) if (!treeMatches(target, files)) { replacePortableTree(target, files); changed = true; }
-	for (const dir of removals) { rmSync(dir, { recursive: true }); changed = true; }
+	for (const dir of removals) { removeTemporaryTree(dir); changed = true; }
 	for (const [path, source] of metadata) if (readFileSync(path, "utf8") !== source) { writeFileSync(path, source); changed = true; }
 	return changed;
 }
