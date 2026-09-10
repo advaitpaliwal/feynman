@@ -23,25 +23,23 @@ feynman alpha status
 
 ### Logging in from another device
 
-Before this change, completing the alphaXiv sign-in from a different device was
-not possible at all: the flow hard-assumed the browser and the token-storage
-device were the same machine. Login now also finishes from any device by
-pasting the redirect URL; credentials are always stored on the device running
-Feynman.
+Finish the login from any device by pasting the redirect URL on
+the device running `feynman`, credentials are always stored on
+the device running it.
 
 **Paste the redirect URL (works everywhere, no network setup):** run
-`feynman alpha login`, complete the sign-in on any device you like, then paste
-the browser's final address — `http://127.0.0.1:9876/callback?code=...` — into
-the waiting CLI, which shows a `Paste the redirect URL:` prompt while it
-listens. The page may fail to load (nothing may be listening on the
-browsing device's loopback), but the address bar still holds the URL; the CLI
-extracts the code from it. Press Ctrl-C to cancel. The wait window is 120
-seconds, so complete the sign-in and paste within that time or rerun the
-login.
+`feynman alpha login` or `feynman setup`, complete the sign-in on any
+device you like, then paste the browser's final address 
+`http://127.0.0.1:9876/callback?code=...` into the waiting CLI, which 
+shows a `Paste the redirect URL:` prompt while it listens. The page on the 
+login device may fail to load (nothing may be listening on the browsing 
+device's loopback), but the address bar still holds the URL; the CLI 
+extracts the code from it. Press Ctrl-C to cancel. The wait window is 120 
+seconds, so complete the sign-in and paste within that time or rerun the login.
 
 This works with zero network assumptions: the redirect URI is the token
 device's own loopback (`127.0.0.1`), which is exactly why a remote browser can
-never reach the callback directly — and why the paste path exists.
+never reach the callback directly and why the paste path exists.
 
 **SSH reverse tunnel (hands-free, automatic completion):** forward the
 browsing device's loopback port back to the token device's callback server
@@ -51,7 +49,7 @@ while the login is waiting, e.g. from the token device:
 ssh -R 9876:127.0.0.1:9876 user@browsing-device
 ```
 
-The browser's `http://127.0.0.1:9876/callback` redirect then reaches Feynman
+The browser's `http://127.0.0.1:9876/callback` redirect then reaches `feynman`
 through the tunnel and login completes without pasting anything.
 
 **Published container port (Docker):** when the browser runs on the Docker
