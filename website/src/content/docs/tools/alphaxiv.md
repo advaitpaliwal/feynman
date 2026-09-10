@@ -21,6 +21,53 @@ Check your authentication status:
 feynman alpha status
 ```
 
+### Logging in from another device
+
+Finish the login from any device by pasting the redirect URL on
+the device running `feynman`, credentials are always stored on
+the device running it.
+
+**Paste the redirect URL (works everywhere, no network setup):** run
+`feynman alpha login` or `feynman setup`, complete the sign-in on any
+device you like, then paste the browser's final address 
+`http://127.0.0.1:9876/callback?code=...` into the waiting CLI, which 
+shows a `Paste the redirect URL:` prompt while it listens. The page on the 
+login device may fail to load (nothing may be listening on the browsing 
+device's loopback), but the address bar still holds the URL; the CLI 
+extracts the code from it. Press Ctrl-C to cancel. The wait window is 120 
+seconds, so complete the sign-in and paste within that time or rerun the login.
+
+This works with zero network assumptions: the redirect URI is the token
+device's own loopback (`127.0.0.1`), which is exactly why a remote browser can
+never reach the callback directly and why the paste path exists.
+
+**SSH reverse tunnel (hands-free, automatic completion):** forward the
+browsing device's loopback port back to the token device's callback server
+while the login is waiting, e.g. from the token device:
+
+```bash
+ssh -R 9876:127.0.0.1:9876 user@browsing-device
+```
+
+The browser's `http://127.0.0.1:9876/callback` redirect then reaches `feynman`
+through the tunnel and login completes without pasting anything.
+
+**Published container port (Docker):** when the browser runs on the Docker
+host, publish the callback port and bind all interfaces so the loopback
+redirect resolves through the published port:
+
+```bash
+docker run -p 9876:9876 -e ALPHAXIV_CALLBACK_BIND=0.0.0.0 ... feynman alpha login
+```
+
+The callback is configurable through environment variables, all optional:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ALPHAXIV_CALLBACK_PORT` | `9876` | Callback port used in both the redirect URI and the local server bind |
+| `ALPHAXIV_CALLBACK_HOST` | `127.0.0.1` | Loopback host in the redirect URI (`localhost`, `127.x`, or `::1`). The redirect URI is always `http` and the direct browser callback is loopback-only; a non-loopback value is rejected with an error pointing to the paste fallback |
+| `ALPHAXIV_CALLBACK_BIND` | the loopback callback host | Address the local callback server binds (e.g. `0.0.0.0` inside Docker) |
+
 ## What it provides
 
 AlphaXiv gives Feynman access to several capabilities that power the research workflows:
