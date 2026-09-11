@@ -48,13 +48,23 @@ export function upsertProviderBaseUrl(
 	return upsertProviderConfig(modelsJsonPath, providerId, { baseUrl });
 }
 
+export type ModelsJsonModelConfig = {
+	id: string;
+	name?: string;
+	reasoning?: boolean;
+	input?: Array<"text" | "image">;
+	contextWindow?: number;
+	maxTokens?: number;
+	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+};
+
 export type ProviderConfigPatch = {
 	baseUrl?: string;
 	apiKey?: string;
 	api?: string;
 	authHeader?: boolean;
 	headers?: Record<string, string>;
-	models?: Array<{ id: string }>;
+	models?: ModelsJsonModelConfig[];
 };
 
 export function upsertProviderConfig(

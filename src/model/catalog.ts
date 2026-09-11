@@ -47,6 +47,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 	openai: "OpenAI",
 	"openai-codex": "OpenAI Codex",
 	openrouter: "OpenRouter",
+	requesty: "Requesty",
 	google: "Google",
 	"google-gemini-cli": "Google Gemini CLI",
 	zai: "Z.AI / GLM",

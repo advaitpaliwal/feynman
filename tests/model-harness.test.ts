@@ -36,6 +36,7 @@ const MODEL_ENV_KEYS = [
 	"GOOGLE_API_KEY",
 	"GEMINI_API_KEY",
 	"OPENROUTER_API_KEY",
+	"REQUESTY_API_KEY",
 	"OPENCODE_API_KEY",
 	"OPENCODE_ZEN_API_KEY",
 	"MINIMAX_API_KEY",
@@ -447,6 +448,15 @@ test("resolveModelProviderForCommand supports LiteLLM as a first-class proxy pro
 	assert.equal(resolved?.id, "litellm");
 });
 
+test("resolveModelProviderForCommand supports Requesty as a first-class gateway provider", async () => {
+	const authPath = createAuthPath({});
+
+	const resolved = await resolveModelProviderForCommand(authPath, "requesty");
+
+	assert.equal(resolved?.kind, "api-key");
+	assert.equal(resolved?.id, "requesty");
+});
+
 test("resolveModelProviderForCommand prefers OAuth when a provider supports both auth modes", async () => {
 	const authPath = createAuthPath({});
 
@@ -641,6 +651,7 @@ test("isLocalModelProvider flags custom providers whose models.json baseUrl poin
 			providers: {
 				"my-proxy": { baseUrl: "http://127.0.0.1:8000/v1" },
 				openrouter: { baseUrl: "https://openrouter.ai/api/v1" },
+				requesty: { baseUrl: "https://router.requesty.ai/v1" },
 			},
 		}) + "\n",
 		"utf8",
@@ -648,6 +659,7 @@ test("isLocalModelProvider flags custom providers whose models.json baseUrl poin
 
 	assert.equal(isLocalModelProvider(authPath, "my-proxy"), true);
 	assert.equal(isLocalModelProvider(authPath, "openrouter"), false);
+	assert.equal(isLocalModelProvider(authPath, "requesty"), false);
 });
 
 test("buildLocalModelWorkflowNotice names the configured model and the workflow", () => {

@@ -80,6 +80,7 @@ test("DeepSeek V4 Pro IDs remain available while genuine premium Pro models stay
 		"baseten/deepseek-ai/DeepSeek-V4-Pro",
 		"fireworks/accounts/fireworks/models/deepseek-v4-pro",
 		"openrouter/deepseek/deepseek-v4-pro",
+		"requesty/deepseek-v4-pro",
 	]) {
 		assert.equal(isProClassModelSpec(spec), false, spec);
 	}

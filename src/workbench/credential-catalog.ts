@@ -14,6 +14,7 @@ const MODEL_CREDENTIAL_SECTIONS: Record<string, { section: string; source: strin
 	opencode: { section: "Model providers", source: "Feynman model login", tags: ["model", "gateway"] },
 	"opencode-go": { section: "Model providers", source: "Feynman model login", tags: ["model", "gateway"] },
 	openrouter: { section: "Model providers", source: "Feynman model login", tags: ["model", "gateway"] },
+	requesty: { section: "Model providers", source: "Feynman model login", tags: ["model", "gateway"] },
 };
 
 const ADDITIONAL_CREDENTIAL_PROVIDERS: WorkbenchCredentialProvider[] = [

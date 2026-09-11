@@ -54,6 +54,8 @@ Local models are supported through the setup flow. For LM Studio, run `feynman s
 
 To authenticate another hosted provider, run `feynman model login <provider>`. GitHub Copilot sign-in retries model discovery once when GitHub rate-limits the request. OpenRouter login opens an OAuth page and listens for a local callback; over SSH or in another headless environment, paste the browser's final redirect URL or authorization code into Feynman's prompt, or set `OPENROUTER_API_KEY` before launch to use API-key authentication without OAuth.
 
+Requesty is supported as a hosted OpenAI-compatible gateway. Run `feynman model login requesty` (or choose `Requesty` in `feynman setup`), keep the default `https://router.requesty.ai/v1` or enter `https://router.eu.requesty.ai/v1` for EU routing, and set `REQUESTY_API_KEY` (from [app.requesty.ai/api-keys](https://app.requesty.ai/api-keys)) before launch. Feynman registers Requesty's managed routing policies (for example `requesty/claude-sonnet-4-5`) and can also register the full `vendor/model` catalog (for example `requesty/openai/gpt-4o-mini`). `REQUESTY_BASE_URL` changes the default router URL offered during setup.
+
 ### Skills Only
 
 If you want just the research skills without the full terminal app:

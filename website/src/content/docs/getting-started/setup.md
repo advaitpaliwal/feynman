@@ -49,6 +49,25 @@ Amazon Bedrock (AWS credential chain)
 
 Feynman verifies the same AWS credential chain Pi uses at runtime, including `AWS_PROFILE`, `~/.aws` credentials/config, SSO, ECS/IRSA, and EC2 instance roles. Once that check passes, Bedrock models become available in `feynman model list` without needing a traditional API key.
 
+### Requesty
+
+Requesty is a hosted OpenAI-compatible gateway that routes one API key across 700+ models. Choose the API-key flow, then select:
+
+```text
+Requesty (OpenAI-compatible gateway)
+```
+
+The default settings are:
+
+```text
+Base URL: https://router.requesty.ai/v1 (or https://router.eu.requesty.ai/v1 for EU routing)
+API mode: openai-completions
+API key: read from REQUESTY_API_KEY unless you paste one
+Model catalog: managed policies, optionally plus the full vendor/model catalog
+```
+
+Get a key at [app.requesty.ai/api-keys](https://app.requesty.ai/api-keys). Feynman reads Requesty's `/models/managed` endpoint (curated, Requesty-maintained routing policies such as `claude-sonnet-4-5` or `gpt-5.4-mini`) and can also merge the full `/models` catalog (`vendor/model` ids such as `openai/gpt-4o-mini`). Models appear in `feynman model list` as `requesty/<id>`. Set `REQUESTY_BASE_URL` to change the router URL offered by default, for example to the EU router.
+
 ### Local models: LM Studio, LiteLLM, Ollama, vLLM
 
 If you want to use LM Studio, start the LM Studio local server, load a model, choose the API-key flow, and then select:
