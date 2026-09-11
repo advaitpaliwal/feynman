@@ -13,6 +13,7 @@ export const MODEL_API_KEY_PROVIDERS: ApiKeyProviderInfo[] = [
 	{ id: "__custom__", label: "Custom provider (local/self-hosted/proxy)" },
 	{ id: "amazon-bedrock", label: "Amazon Bedrock (AWS credential chain)" },
 	{ id: "openrouter", label: "OpenRouter", envVar: "OPENROUTER_API_KEY" },
+	{ id: "requesty", label: "Requesty (OpenAI-compatible gateway)", envVar: "REQUESTY_API_KEY" },
 	{ id: "zai", label: "Z.AI / GLM", envVar: "ZAI_API_KEY" },
 	{ id: "kimi-coding", label: "Kimi / Moonshot", envVar: "KIMI_API_KEY" },
 	{ id: "minimax", label: "MiniMax", envVar: "MINIMAX_API_KEY" },

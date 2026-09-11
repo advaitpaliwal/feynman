@@ -6,6 +6,10 @@ GitHub release notes are generated from the matching `## vX.Y.Z` section in this
 
 ## Unreleased
 
+### Model providers
+
+- Added Requesty as an opt-in OpenAI-compatible gateway provider. `feynman model login requesty` (or `Requesty` in `feynman setup`) reads `REQUESTY_API_KEY`, accepts the EU router `https://router.eu.requesty.ai/v1` (or `REQUESTY_BASE_URL`), and registers Requesty's managed routing policies, optionally merged with the full `vendor/model` catalog, as `requesty/<id>` models with context window, output limit, vision, reasoning, and cost metadata.
+
 ## v0.3.49 - 2026-09-06
 
 ### Research runtime refresh

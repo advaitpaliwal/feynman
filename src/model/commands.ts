@@ -17,7 +17,16 @@ import {
 } from "./catalog.js";
 import { MODEL_API_KEY_PROVIDERS, type ApiKeyProviderInfo } from "./api-key-providers.js";
 import { createModelRegistry, createModelRuntime, getModelsJsonPath } from "./registry.js";
-import { upsertProviderBaseUrl, upsertProviderConfig } from "./models-json.js";
+import { type ModelsJsonModelConfig, upsertProviderBaseUrl, upsertProviderConfig } from "./models-json.js";
+import {
+	REQUESTY_API_KEY_ENV_VAR,
+	REQUESTY_API_KEYS_URL,
+	REQUESTY_EU_BASE_URL,
+	REQUESTY_PROVIDER_ID,
+	fetchRequestyCatalog,
+	resolveRequestyDefaultBaseUrl,
+	toRequestyModelConfig,
+} from "./requesty.js";
 
 const exec = promisify(execCallback);
 
@@ -117,6 +126,9 @@ function apiKeyProviderHint(provider: ApiKeyProviderInfo): string {
 	if (provider.id === "litellm") {
 		return "http://localhost:4000/v1";
 	}
+	if (provider.id === REQUESTY_PROVIDER_ID) {
+		return resolveRequestyDefaultBaseUrl();
+	}
 	return provider.envVar ?? provider.id;
 }
 
@@ -148,6 +160,16 @@ type CustomProviderSetup = {
 	 * but expect Bearer auth instead of x-api-key).
 	 */
 	authHeader: boolean;
+	/**
+	 * Full model configs (metadata such as context window and cost) when the
+	 * provider catalog supplies them. Defaults to bare `{ id }` entries from modelIds.
+	 */
+	models?: ModelsJsonModelConfig[];
+	/**
+	 * If false, verification skips checking that `/models` lists the configured
+	 * ids (for gateways whose selectable ids are not all served by `/models`).
+	 */
+	verifyModelIds?: boolean;
 };
 
 function normalizeProviderId(value: string): string {
@@ -471,6 +493,66 @@ async function promptLiteLlmProviderSetup(): Promise<CustomProviderSetup | undef
 	};
 }
 
+async function promptRequestyProviderSetup(): Promise<CustomProviderSetup | undefined> {
+	printSection("Requesty");
+	printInfo("Requesty is a hosted OpenAI-compatible gateway with one API key across 700+ models.");
+	printInfo(`Get a key at ${REQUESTY_API_KEYS_URL}. Docs: https://docs.requesty.ai`);
+	printInfo(`Tip: to avoid writing secrets to disk, set ${REQUESTY_API_KEY_ENV_VAR} in your shell or .env.`);
+
+	const baseUrlRaw = await promptText(
+		`Base URL (EU routing: ${REQUESTY_EU_BASE_URL})`,
+		resolveRequestyDefaultBaseUrl(),
+	);
+	const { baseUrl } = normalizeCustomProviderBaseUrl("openai-completions", baseUrlRaw);
+	if (!baseUrl) {
+		printWarning("Base URL is required.");
+		return undefined;
+	}
+
+	const pastedKey = (await promptText(`Paste API key (leave empty to use ${REQUESTY_API_KEY_ENV_VAR} env var)`, "")).trim();
+	// Pi resolves `$VAR` from the environment at request time; a pasted key is stored as a literal in models.json.
+	const apiKeyConfig = pastedKey || `$${REQUESTY_API_KEY_ENV_VAR}`;
+	const resolvedKey = pastedKey || process.env[REQUESTY_API_KEY_ENV_VAR]?.trim() || undefined;
+	if (!resolvedKey) {
+		printInfo(`Set ${REQUESTY_API_KEY_ENV_VAR} in your shell or .env before using Feynman.`);
+	}
+
+	const catalogChoices = [
+		"Managed policies (curated, Requesty-maintained routing for ~150 models)",
+		"Managed policies plus the full vendor/model catalog (700+ models)",
+		"Cancel",
+	];
+	const catalogSelection = await promptChoice("Model catalog to register:", catalogChoices, 0);
+	if (catalogSelection >= 2) {
+		return undefined;
+	}
+	const includeFullCatalog = catalogSelection === 1;
+
+	const catalog = await fetchRequestyCatalog(baseUrl, resolvedKey, { includeFullCatalog });
+	if (!catalog || catalog.models.length === 0) {
+		printWarning(`Could not fetch the Requesty model catalog from ${baseUrl}/models/managed or ${baseUrl}/models.`);
+		return undefined;
+	}
+	if (!catalog.sources.includes("managed")) {
+		printWarning("Managed policies were unavailable; registered the full vendor/model catalog instead.");
+	}
+
+	const models = catalog.models.map(toRequestyModelConfig);
+	const sample = models.slice(0, 10).map((model) => model.id).join(", ");
+	printInfo(`Detected ${models.length} Requesty models: ${sample}${models.length > 10 ? ", ..." : ""}`);
+
+	return {
+		providerId: REQUESTY_PROVIDER_ID,
+		modelIds: models.map((model) => model.id),
+		models,
+		baseUrl,
+		api: "openai-completions",
+		apiKeyConfig,
+		authHeader: true,
+		verifyModelIds: false,
+	};
+}
+
 async function verifyCustomProvider(setup: CustomProviderSetup, authPath: string): Promise<void> {
 	const registry = await createModelRegistry(authPath);
 	const modelsError = registry.getError();
@@ -525,7 +607,9 @@ async function verifyCustomProvider(setup: CustomProviderSetup, authPath: string
 			const modelIds = Array.isArray((json as any)?.data)
 				? (json as any).data.map((entry: any) => (typeof entry?.id === "string" ? entry.id : undefined)).filter(Boolean)
 				: [];
-			const missing = setup.modelIds.filter((id) => modelIds.length > 0 && !modelIds.includes(id));
+			const missing = setup.verifyModelIds === false
+				? []
+				: setup.modelIds.filter((id) => modelIds.length > 0 && !modelIds.includes(id));
 			if (modelIds.length > 0 && missing.length > 0) {
 				printWarning(`Verification: /models does not list configured model id(s): ${missing.join(", ")}`);
 				return;
@@ -706,6 +790,31 @@ async function configureApiKeyProvider(authPath: string, providerId?: string): P
 		}
 
 		printSuccess("Saved LiteLLM provider.");
+		await verifyCustomProvider(setup, authPath);
+		return true;
+	}
+
+	if (provider.id === REQUESTY_PROVIDER_ID) {
+		const setup = await promptRequestyProviderSetup();
+		if (!setup) {
+			printInfo("Requesty setup cancelled.");
+			return false;
+		}
+
+		const modelsJsonPath = getModelsJsonPath(authPath);
+		const result = upsertProviderConfig(modelsJsonPath, setup.providerId, {
+			baseUrl: setup.baseUrl,
+			apiKey: setup.apiKeyConfig,
+			api: setup.api,
+			authHeader: setup.authHeader,
+			models: setup.models ?? setup.modelIds.map((id) => ({ id })),
+		});
+		if (!result.ok) {
+			printWarning(result.error);
+			return false;
+		}
+
+		printSuccess("Saved Requesty provider.");
 		await verifyCustomProvider(setup, authPath);
 		return true;
 	}
